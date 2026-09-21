@@ -221,7 +221,7 @@ impl Config {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Cannot create {}", parent.display()))?;
             let body = format!(
-                "# Dymus user configuration.\n# Available themes: tokyo-night, catppuccin-mocha, gruvbox-dark, nord.\n# Start view: home, explore, playlists, albums, artists, podcasts, search, or queue.\n# Colors are optional six-digit hex overrides (examples below use Tokyo Night).\n# Uncomment and edit any value:\n# [colors]\n# text = \"#c0caf5\"\n# secondary = \"#a9b1d6\"\n# muted = \"#737aa2\"\n# accent = \"#7aa2f7\"\n# good = \"#9ece6a\"\n# warning = \"#e0af68\"\n# error = \"#f7768e\"\n\n{}",
+                "# Dymus user configuration.\n# Available themes: tokyo-night, catppuccin-mocha, gruvbox-dark, nord.\n# Start view: home, explore, playlists, albums, artists, podcasts, radio, search, or queue.\n# Colors are optional six-digit hex overrides (examples below use Tokyo Night).\n# Uncomment and edit any value:\n# [colors]\n# text = \"#c0caf5\"\n# secondary = \"#a9b1d6\"\n# muted = \"#737aa2\"\n# accent = \"#7aa2f7\"\n# good = \"#9ece6a\"\n# warning = \"#e0af68\"\n# error = \"#f7768e\"\n\n{}",
                 toml::to_string_pretty(self)?
             );
             fs::write(&path, body).with_context(|| format!("Cannot write {}", path.display()))

@@ -1,169 +1,132 @@
 # Dymus
 
-A keyboard-driven YouTube Music streaming TUI, written in Rust. Dymus uses
-InnerTube for song search, yt-dlp to resolve audio streams, and mpv for playback.
+Dymus is a keyboard-driven YouTube Music streaming TUI for Linux. It searches
+YouTube Music through InnerTube, resolves streams with yt-dlp, and controls mpv
+for audio playback. It uses the terminal's own background and defaults to the
+Tokyo Night palette.
 
-Phase 1 is complete: **discover, search, play, queue, and browse a signed-in
-library**, with lyrics and audio-reactive visualizers in the Now Playing view.
+## Features
 
-## Run
+- Home and Explore feeds, public search, and a separate playback queue.
+- Signed-in Playlists, Albums, Artists, and Podcasts views.
+- Bulk playback and queue operations for marked songs.
+- Generated YouTube Music radio from any focused song.
+- World Radio via Radio Browser, with station, country, language, genre, and
+  sorting filters.
+- Playback progress, seeking, volume, cover art, and automatic queue advancement.
+- A Now Playing view with queue, lyrics, and nine visualizer styles.
+- Plain and synced lyrics from LRCLIB.
+- Theme presets, color overrides, configurable startup view, and keybindings.
 
-Requires Linux, Rust, `mpv`, and `yt-dlp` on your `PATH`. No API key or account is
-required for public song search. Playback availability depends on YouTube and
-may vary by track and region.
+## Install and run
 
-Audio-reactive visualizers also use the PipeWire command-line tools `pw-dump` and
-`pw-record`. Playback continues without them, with animated fallback visuals.
+Dymus targets Linux and needs Rust, `mpv`, and `yt-dlp` on `PATH`. Public
+search and World Radio do not require an account. Playback availability depends
+on the track and region.
+
+PipeWire's `pw-dump` and `pw-record` enable audio-reactive visualizers.
+Music playback works without them, using animated fallback visuals.
 
 ```sh
+git clone https://github.com/britonmearsty/dymus.git
+cd dymus
 cargo run -- doctor
 cargo run
 ```
 
-For an optimized binary:
+For an optimized build:
 
 ```sh
 cargo build --release
 ./target/release/dymus
 ```
 
-Dymus keeps the last successful Home and Explore feeds in
-`$XDG_CACHE_HOME/dymus` (normally `~/.cache/dymus`). On the next launch it
-shows that feed immediately, then refreshes it from YouTube Music in the
-background.
+`dymus doctor` checks the external playback and PipeWire tools. Normal startup
+does not wait for those checks. Image-protocol detection uses a short probe and
+falls back to halfblocks when the terminal does not respond.
 
-Search without opening the TUI (returns JSON):
+Search can run without opening the TUI and returns JSON:
 
 ```sh
 cargo run -- search "Nujabes Feather"
 ```
 
+## How it works
+
+Home, Explore, search, library, and generated radio requests use YouTube Music's
+unofficial InnerTube endpoints. A successful Home or Explore feed is stored in
+`$XDG_CACHE_HOME/dymus` (usually `~/.cache/dymus`). On the next launch, Dymus
+shows that cached feed immediately, refreshes it in the background, and replaces
+it when the fresh response arrives.
+
+When playback starts, yt-dlp resolves the selected YouTube URL to an audio
+stream. Dymus passes that stream to mpv and monitors mpv through its JSON IPC
+socket for progress, pause state, failures, and end-of-track events. Each
+attempt receives a generation ID, so late events from a cancelled attempt cannot
+change the active queue. Helper processes stop when playback is cancelled or the
+application exits.
+
+Cover images use the best terminal image protocol detected at launch. Lyrics are
+looked up from LRCLIB using the active track metadata. The visualizer attempts
+to isolate Dymus's mpv stream through PipeWire and analyze its audio frames; if
+capture is unavailable, it uses its fallback animation.
+
+## Views
+
+Home and Explore contain browseable YouTube Music collections. Press Enter on a
+collection to open its tracks and Esc to return. Search contains public tracks;
+the queue contains upcoming playback. Playlists, Albums, Artists, and Podcasts
+are separate top-level signed-in views.
+
+Now Playing presents the active track, cover art, and a minimal progress bar. Its
+right panel switches between queue, visualizer, and lyrics. Synced lyrics
+distinguish elapsed, current, and upcoming lines; plain lyrics can be scrolled.
+
 ## Authentication
 
-Public search and radio work without an account. Add browser-session
-authentication to use library and account endpoints:
+Signing in enables library and account endpoints. Public search, generated
+radio, and World Radio work without an account.
 
-1. Sign in to YouTube Music in your browser, open Developer Tools → Network,
-   and copy the **Cookie request header value** from a successful `browse`
-   request. Do not copy the `Cookie:` label.
-2. Enter it into Dymus's hidden-input prompt:
+1. Sign in to YouTube Music in a browser. In Developer Tools → Network, copy
+   the **Cookie request header value** from a successful `browse` request,
+   without the `Cookie:` label.
+2. Paste it into Dymus's hidden-input prompt:
 
    ```sh
    cargo run -- auth paste
    ```
 
-   For another signed-in Google account, use its `X-Goog-AuthUser` index:
-   `cargo run -- auth paste --auth-user 1`.
-3. Dymus signs and checks an account request before saving. On Linux, it stores
-   credentials in `$XDG_CONFIG_HOME/dymus/auth.json` (or
-   `~/.config/dymus/auth.json`), restricts the directory to `0700` and file to
-   `0600`, and attaches the session only to `music.youtube.com` requests. The
-   file is permission-protected but not encrypted. An expired or logged-out
-   session is reported by `dymus auth status`; paste a fresh cookie to replace
-   it. `dymus auth logout` removes the local copy.
+   To use another Google account in that browser session, provide its
+   `X-Goog-AuthUser` index: `cargo run -- auth paste --auth-user 1`.
+3. Dymus signs and validates an account request before saving credentials. Use
+   `dymus auth status` to check the saved session and `dymus auth logout` to
+   remove it.
 
-Browser cookies are bearer credentials for your Google session. Never paste
-them into an issue, chat, shell command, or source file. If you accidentally
-expose one, revoke that Google session and create a fresh cookie before using
-Dymus. Dymus does not read your browser profile or print or log cookie values.
+Credentials live in `$XDG_CONFIG_HOME/dymus/auth.json` (normally
+`~/.config/dymus/auth.json`). Dymus creates the directory with `0700` and the
+file with `0600`, only attaches the session to `music.youtube.com` requests,
+and never reads browser profiles or logs cookie values. The file is protected by
+filesystem permissions but is not encrypted.
 
-## Controls
-
-Dymus starts on Home by default. Choose another startup view in Settings or set
-`start_view` in the TOML configuration. Press `/` to focus Search, type a query,
-and press Enter. While editing, ordinary keys enter text; press Esc to return
-to browsing.
-
-| Key | Action |
-| --- | --- |
-| `/` | Edit search |
-| Enter | Submit search, or play marked songs / the focused song |
-| `j` / `k`, arrows | Move selection |
-| `g` / `G`, Home / End | First / last item |
-| Tab | Switch search results / queue |
-| `.` | Open contextual actions (j/k to choose, Enter to apply) |
-| `x` | Mark / unmark the focused song |
-| `v` | Select / deselect all songs in the current view |
-| Esc / `X` | Clear marks (Esc also cancels a pending radio request while browsing) |
-| `a` | Append marked search results, or the focused result, to queue |
-| `A` | Put marked search results, or the focused result, next in queue |
-| `P` | Play all songs in the current view, replacing the upcoming queue |
-| `Q` | Append all loaded search results to queue |
-| `R` | Start radio from the focused song, replacing the queue after loading |
-| `d`, Delete | Remove marked queued songs, or the focused entry |
-| `J` / `K` | Move marked queued songs, or the focused entry, down / up |
-| `C` | Clear the upcoming queue without interrupting the current song |
-| Space | Pause / resume |
-| `n` | Skip to next queued song |
-| `r` | Restart or retry current song |
-| Left / Right | Seek backward / forward five seconds |
-| `-` / `+` | Adjust volume |
-| `?` | Show keyboard help (j/k scroll on small terminals) |
-| `q` | Quit from browsing mode |
-| Ctrl+C | Quit from any mode |
-| Ctrl+U | Clear the search field while editing |
-| `h` / `e` | Open Home / Explore |
-| `s` | Open Settings to switch themes and choose a startup view |
-| `1`–`4` | Open Playlists / Albums / Artists / Podcasts as top-level views |
-| Enter / Esc | Open a collection item / return from its detail |
-| `t` | Open Now Playing for the current song |
-| `q` / `v` / `y` / Tab | In Now Playing: queue / visualizer / lyrics / cycle panels |
-| Shift+Tab | In Now Playing: cycle panels backward |
-| `m` / `[` / `]` | In the visualizer: cycle styles / previous / next |
-| `p` | In lyrics: switch plain and synced lyrics when both exist |
-| `j` / `k` | In plain lyrics: scroll down / up |
-
-Bulk actions use marked songs when there are any, otherwise the focused row.
-Marks are independent between search and queue, and follow queued entries when
-reordered or when playback advances. Selection markers appear only while a
-selection exists; Esc clears them.
-
-Enter plays the first chosen song and puts the rest next, preserving their list
-order and any unselected upcoming tracks. Selected queue entries are moved, not
-duplicated. `P` replaces the queue with the whole current list, while `Q` appends
-all search results. “All” means every loaded result, including rows off-screen;
-search pagination is not implemented yet. Completed bulk actions clear their
-selection.
-
-`R` always uses the focused song, even when other songs are marked. Dymus fetches
-a YouTube Music radio mix through InnerTube, starts with that song, then plays
-the returned related tracks. Duplicate and unavailable entries are skipped.
-Current playback and the queue remain intact if fetching fails. Esc, a new radio
-request, or a manual playback/queue change cancels a pending request, preventing
-late results from overwriting your edits. Radio currently loads one generated
-mix; it does not fetch an endless stream of recommendations.
-
-Adding to an idle queue does not start playback; use Enter or `n`. Failed tracks
-remain selected for `r` to retry or `n` to skip. Exiting stops playback.
-
-The default theme uses [Tokyo Night](https://github.com/folke/tokyonight.nvim)
-foreground colors and the terminal's own background, preserving transparency.
-The borderless layout shows one view at a time: Search or queue, switched with
-Tab. A pointer and blue text indicate the selected song. Playback information
-appears only when a track is active; shortcuts are available under `?`.
-No special font or terminal image support is needed. Esc dismisses an error
-while browsing.
+Browser cookies are bearer credentials. Do not put them in issues, chat, shell
+history, or source files. If exposed, revoke that Google session and use a fresh
+cookie.
 
 ## Configuration
 
-Phase 2 starts with editable appearance and core shortcuts. On first launch,
-Dymus creates `$XDG_CONFIG_HOME/dymus/config.toml` (normally
-`~/.config/dymus/config.toml`). Press `s` to open Settings. Up/Down selects the
-theme or startup view; Left/Right changes it, and the selection is saved
-immediately. The default startup view is Home. Choose Home, Explore, Playlists,
-Albums, Artists, Podcasts, World Radio, Search, or Queue. Built-in themes are Tokyo Night,
-Catppuccin Mocha, Gruvbox Dark, and Nord. The app keeps the terminal's default
-background for transparency.
+On first launch Dymus creates `$XDG_CONFIG_HOME/dymus/config.toml` (normally
+`~/.config/dymus/config.toml`). Press `s` to open Settings: Up/Down selects a
+theme or startup view, Left/Right changes it, and the selection is saved
+immediately. The default startup view is Home.
 
-The TOML file also accepts optional six-digit hex color overrides and custom
-keys for settings, search, help, Home, Explore, Playlists, Albums, Artists,
-Podcasts, World Radio, queue, Now Playing, pause, next, retry, volume, and quit. Key values
-accept a character or names such as `Tab`, `Space`, `Enter`, `Esc`, `Left`, and
-`Ctrl+U`. For example:
+Built-in themes are Tokyo Night, Catppuccin Mocha, Gruvbox Dark, and Nord. The
+terminal background stays untouched for transparency. The TOML file accepts
+six-digit color overrides and custom keys. Key values accept one character or
+names such as `Tab`, `Space`, `Enter`, `Esc`, `Left`, and `Ctrl+U`.
 
 ```toml
 theme = "nord"
-start_view = "home"
+start_view = "home" # home, explore, playlists, albums, artists, podcasts, radio, search, queue
 
 [colors]
 accent = "#88c0d0"
@@ -180,44 +143,79 @@ radio = "o"
 next_track = "n"
 ```
 
-For custom colors, remove the leading `#` comment from entries in the generated
-file's `[colors]` example. Restart Dymus after editing keybindings or colors.
+Restart after manually editing keys or colors. Settings changes made in the app
+are applied and saved immediately.
 
-## World radio
+## Controls
 
-Press `o` to browse live stations through Radio Browser. The default list is
-sorted by popularity and only includes stations the directory reports as
-working. Use `/`, `c`, `l`, and `g` to filter by station name, country,
-language, and genre. `z` cycles popularity, trending, votes, bitrate, and
-alphabetical sort; `x` clears filters. Press Enter to play the selected station
-directly.
+The footer shows actions available in the current view. `/` focuses Search;
+type a query and press Enter. While editing, ordinary keys enter text and Esc
+returns to browsing.
 
-## Phase 1 features and boundaries
+| Key | Action |
+| --- | --- |
+| `h` / `e` | Home / Explore |
+| `1` / `2` / `3` / `4` | Playlists / Albums / Artists / Podcasts |
+| `o` | World Radio |
+| `/` | Search or edit the World Radio station filter |
+| Tab | Switch Search and queue, or cycle Now Playing panels |
+| `t` | Now Playing |
+| `s` / `?` / `q` | Settings / help / quit |
+| `j` / `k`, arrows | Move selection |
+| `g` / `G`, Home / End | First / last row |
+| Enter | Search, open a collection, or play the focused/marked song |
+| Esc | Return from a collection, clear marks, or dismiss an error |
+| `x` / `v` | Mark focused song / select or deselect all |
+| `.` | Open contextual actions |
+| `a` / `A` | Append to queue / put next |
+| `P` / `Q` | Play all / queue all loaded songs |
+| `R` | Start generated radio from focused song |
+| `d`, Delete | Remove focused or marked queue entries |
+| `J` / `K` | Move focused or marked queue entries down / up |
+| `C` | Clear upcoming tracks without stopping the current track |
+| Space / `n` / `r` | Pause or resume / skip / restart or retry |
+| Left / Right | Seek backward or forward five seconds |
+| `-` / `+` | Lower or raise volume |
+| Ctrl+C / Ctrl+U | Quit from any mode / clear search while editing |
 
-- Search and open public YouTube Music results; search currently loads one page.
-- Home, Explore, Search, Queue, World Radio, and four separate authenticated collection views:
-  Playlists, Albums, Artists, and Podcasts.
-- Background stream resolution, queue editing and bulk actions, radio, and
-  automatic track advancement.
-- Playback progress, pause, seeking, volume, cover art, and a Now Playing view.
-- Phase 2: TOML configuration, switchable theme presets, color overrides, and
-  configurable core navigation and playback shortcuts.
-- LRCLIB plain and synced lyrics, plus nine visualizer styles. PipeWire-backed
-  visualizers analyze Dymus's own mpv stream; without `pw-dump`, `pw-record`, or
-  a reachable PipeWire session, animated fallback visuals are shown.
-- Browser credentials are entered privately by the user; Dymus does not read
-  browser profiles. No audio or music files are saved by Dymus.
-- The queue and search state are in memory only. Search pagination, endless
-  radio continuation, shuffle/repeat, MPRIS, and background playback are not
-  included in Phase 1. Exiting stops playback.
+Bulk actions use marked songs when marks exist; otherwise they use the focused
+row. `P` replaces the upcoming queue with the loaded list, while `Q` appends
+it. Enter starts the first chosen song and puts the remaining songs next while
+preserving order. Queue marks follow their entries when moved or advanced.
 
-This version uses Unix sockets and targets Linux.
+Inside Now Playing, `q`, `v`, and `y` choose the queue, visualizer, and
+lyrics panels. Tab and Shift+Tab cycle between those panels. In the visualizer,
+`m` or `]` selects the next style and `[` selects the previous style. In
+the lyrics panel, `p` switches between plain and synced lyrics when both are
+available, and `j`/`k` scroll plain lyrics.
 
-InnerTube is an unofficial API and can change. Stream extraction depends on a
-working yt-dlp installation. Dymus deliberately ignores user yt-dlp/mpv config
-so unrelated player options cannot change its behavior. If playback fails, check
-`dymus doctor`, update yt-dlp through your package manager, and try another track.
-Account-restricted tracks are not supported yet.
+## Generated radio and World Radio
+
+`R` builds a YouTube Music mix from the focused song. It starts with that song,
+then queues related tracks returned by InnerTube while skipping duplicates and
+unavailable entries. Existing playback and the queue remain intact if loading
+fails. Esc, another radio request, or a manual playback/queue change cancels a
+pending request.
+
+World Radio uses Radio Browser's public directory and plays station URLs
+directly through mpv. The initial list contains popular working stations. Use
+`/`, `c`, `l`, and `g` to filter by station name, country, language, and
+genre. `f` selects a filter, `i` edits it, `z` cycles popularity, trending,
+votes, bitrate, and alphabetical sort, and `x` clears filters. Enter plays the
+selected station.
+
+## Limits and troubleshooting
+
+Search loads one page. Generated radio loads one mix and does not continue
+endlessly. Shuffle, repeat, MPRIS, background playback, and queue persistence
+are not included. Queue and search state stay in memory; exiting stops playback.
+Account-restricted tracks are not supported.
+
+InnerTube is unofficial and may change. Stream extraction relies on a current
+yt-dlp installation. Dymus deliberately ignores user yt-dlp and mpv configuration
+so unrelated player options cannot alter its behavior. If playback fails, run
+`dymus doctor`, update yt-dlp through your package manager, and try another
+track. Dymus targets Linux and uses Unix sockets for mpv IPC.
 
 ## Development
 
@@ -225,40 +223,32 @@ Account-restricted tracks are not supported yet.
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-# Optional real mpv integration test: uses generated silence and null audio output.
+# Optional mpv integration test: generated silence and null audio output.
 cargo test mpv_reports_playback_and_eof_with_local_audio -- --ignored
 # Optional live search → stream test: public query, null audio output, network required.
 cargo test live_search_resolve_and_stream_audio -- --ignored --nocapture
-# Optional live radio check (fetches tracks without playing audio).
+# Optional generated-radio request check.
 cargo test live_radio_returns_related_tracks -- --ignored --nocapture
 ```
 
-Unit tests cover bulk queue behavior, radio cancellation and failure recovery,
-stale playback events, keyboard modes, search/radio parsing, and terminal layouts. `tests/fixtures/search.json` is a
-synthetic InnerTube-shaped response containing duplicate, unavailable, malformed,
-and multi-artist entries. `tests/fixtures/radio.json` covers wrapped tracks,
-alternate counterparts, duplicates and unavailable tracks. The mpv test needs mpv and access to local Unix sockets;
-it does not need the network or an audio device.
-
 Source layout:
 
-- `innertube.rs`: HTTP client and conversion of search renderers into tracks.
+- `innertube.rs`: YouTube Music HTTP client and response parsing.
 - `model.rs`: track and queue data.
-- `player.rs`: asynchronous extraction, mpv lifecycle and JSON IPC.
-- `visualizer.rs`: PipeWire stream discovery and real-time audio analysis.
-- `config.rs`: TOML preferences, theme palettes, and keybindings.
-- `app.rs`: actions, search jobs and playback state.
+- `player.rs`: stream extraction, mpv lifecycle, and JSON IPC.
+- `visualizer.rs`: PipeWire discovery and audio analysis.
+- `lyrics.rs`: LRCLIB lookup and synced-lyric parsing.
+- `radio.rs`: Radio Browser client and station filtering.
+- `cache.rs`: local Home and Explore cache.
+- `config.rs`: TOML preferences, palettes, and keybindings.
+- `app.rs`: application state, actions, and asynchronous jobs.
 - `ui.rs`: terminal layout and rendering.
-
-Every playback attempt gets a generation ID. Events from cancelled attempts are
-ignored, preventing a delayed lookup or old end-of-track event from changing the
-current queue. Extraction and audio subprocesses are terminated on cancellation.
 
 ## Inspiration
 
 - [ytermusic](https://github.com/ccgauche/ytermusic): simplicity and playlist workflow.
 - [youtui](https://github.com/nick42d/youtui): music discovery and keyboard navigation.
 - [ytmusic-tui](https://github.com/WakaTaira/ytmusic-tui): browsing and queue interaction.
-- [ytmusicapi](https://github.com/sigma67/ytmusicapi): reference for InnerTube request and response structures.
+- [ytmusicapi](https://github.com/sigma67/ytmusicapi): InnerTube request and response reference.
 
 Dymus is not affiliated with or endorsed by YouTube or Google.
