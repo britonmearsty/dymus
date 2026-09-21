@@ -96,6 +96,7 @@ editing, ordinary keys enter text; press Esc to return to browsing.
 | Ctrl+C | Quit from any mode |
 | Ctrl+U | Clear the search field while editing |
 | `h` / `e` / `l` | Open Home / Explore / Library |
+| `s` | Open Settings to switch themes |
 | `1`–`4` | In Library: playlists / liked songs / albums / artists |
 | Enter / Esc | Open a Home, Explore, or Library item / return from its detail |
 | `t` | Open Now Playing for the current song |
@@ -136,6 +137,36 @@ appears only when a track is active; shortcuts are available under `?`.
 No special font or terminal image support is needed. Esc dismisses an error
 while browsing.
 
+## Configuration
+
+Phase 2 starts with editable appearance and core shortcuts. On first launch,
+Dymus creates `$XDG_CONFIG_HOME/dymus/config.toml` (normally
+`~/.config/dymus/config.toml`). Press `s` to open Settings and use Left/Right to
+switch the live theme; the selection is saved immediately. Built-in themes are
+Tokyo Night, Catppuccin Mocha, Gruvbox Dark, and Nord. The app keeps the
+terminal's default background for transparency.
+
+The TOML file also accepts optional six-digit hex color overrides and custom
+keys for settings, search, help, Home, Explore, Library, queue, Now Playing,
+pause, next, retry, volume, and quit. Key values accept a character or names
+such as `Tab`, `Space`, `Enter`, `Esc`, `Left`, and `Ctrl+U`. For example:
+
+```toml
+theme = "nord"
+
+[colors]
+accent = "#88c0d0"
+text = "#eceff4"
+
+[keybindings]
+settings = ";"
+search = "/"
+next_track = "n"
+```
+
+For custom colors, remove the leading `#` comment from entries in the generated
+file's `[colors]` example. Restart Dymus after editing keybindings or colors.
+
 ## Phase 1 features and boundaries
 
 - Search and open public YouTube Music results; search currently loads one page.
@@ -144,6 +175,8 @@ while browsing.
 - Background stream resolution, queue editing and bulk actions, radio, and
   automatic track advancement.
 - Playback progress, pause, seeking, volume, cover art, and a Now Playing view.
+- Phase 2: TOML configuration, switchable theme presets, color overrides, and
+  configurable core navigation and playback shortcuts.
 - LRCLIB plain and synced lyrics, plus nine visualizer styles. PipeWire-backed
   visualizers analyze Dymus's own mpv stream; without `pw-dump`, `pw-record`, or
   a reachable PipeWire session, animated fallback visuals are shown.
@@ -188,6 +221,7 @@ Source layout:
 - `model.rs`: track and queue data.
 - `player.rs`: asynchronous extraction, mpv lifecycle and JSON IPC.
 - `visualizer.rs`: PipeWire stream discovery and real-time audio analysis.
+- `config.rs`: TOML preferences, theme palettes, and keybindings.
 - `app.rs`: actions, search jobs and playback state.
 - `ui.rs`: terminal layout and rendering.
 

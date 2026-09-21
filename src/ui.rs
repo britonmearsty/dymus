@@ -1,5 +1,6 @@
 use crate::{
     app::{App, Playback, VisualizerMode},
+    config::{Config, Palette},
     model::Track,
 };
 use ratatui::{
@@ -14,24 +15,42 @@ use ratatui::{
     },
 };
 use ratatui_image::{Image, Resize};
-use std::collections::BTreeSet;
+use std::{cell::Cell as PaletteCell, collections::BTreeSet};
 
-// Tokyo Night foregrounds. Backgrounds stay at the terminal's default, including
-// selections and help, so terminal transparency is preserved throughout.
-const TEXT: Color = Color::Rgb(0xc0, 0xca, 0xf5);
-const SECONDARY: Color = Color::Rgb(0xa9, 0xb1, 0xd6);
-const MUTED: Color = Color::Rgb(0x73, 0x7a, 0xa2);
-const BLUE: Color = Color::Rgb(0x7a, 0xa2, 0xf7);
-const GREEN: Color = Color::Rgb(0x9e, 0xce, 0x6a);
-const YELLOW: Color = Color::Rgb(0xe0, 0xaf, 0x68);
-const RED: Color = Color::Rgb(0xf7, 0x76, 0x8e);
+thread_local! { static ACTIVE_PALETTE: PaletteCell<Palette> = PaletteCell::new(Config::default().palette()); }
+fn text_color() -> Color {
+    ACTIVE_PALETTE.with(|palette| palette.get().text)
+}
+fn secondary_color() -> Color {
+    ACTIVE_PALETTE.with(|palette| palette.get().secondary)
+}
+fn muted_color() -> Color {
+    ACTIVE_PALETTE.with(|palette| palette.get().muted)
+}
+fn accent_color() -> Color {
+    ACTIVE_PALETTE.with(|palette| palette.get().accent)
+}
+fn good_color() -> Color {
+    ACTIVE_PALETTE.with(|palette| palette.get().good)
+}
+fn warning_color() -> Color {
+    ACTIVE_PALETTE.with(|palette| palette.get().warning)
+}
+fn error_color() -> Color {
+    ACTIVE_PALETTE.with(|palette| palette.get().error)
+}
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    ACTIVE_PALETTE.with(|palette| palette.set(app.config.palette()));
     let area = frame.area();
-    frame.render_widget(Block::default().style(Style::default().fg(TEXT)), area);
+    frame.render_widget(
+        Block::default().style(Style::default().fg(text_color())),
+        area,
+    );
     if area.width < 40 || area.height < 14 {
         frame.render_widget(
-            Paragraph::new("Resize to 40 × 14\nCtrl+C quit").style(Style::default().fg(MUTED)),
+            Paragraph::new("Resize to 40 × 14\nCtrl+C quit")
+                .style(Style::default().fg(muted_color())),
             area,
         );
         return;
@@ -39,6 +58,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let inner = area.inner(ratatui::layout::Margin::new(2, 1));
     if app.help {
         help(frame, app, inner);
+        return;
+    }
+    if app.settings_view {
+        settings(frame, app, inner);
         return;
     }
     if app.menu {
@@ -73,7 +96,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         context.push("starting radio… · esc cancel".into());
     }
     frame.render_widget(
-        Paragraph::new(context.join(" · ")).style(Style::default().fg(BLUE)),
+        Paragraph::new(context.join(" · ")).style(Style::default().fg(accent_color())),
         rows[1],
     );
     if show_search {
@@ -86,7 +109,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else if app.queue_focused {
         if app.queue.upcoming.is_empty() {
             frame.render_widget(
-                Paragraph::new("Queue is empty").style(Style::default().fg(MUTED)),
+                Paragraph::new("Queue is empty").style(Style::default().fg(muted_color())),
                 rows[4],
             );
         } else {
@@ -108,7 +131,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             "No songs found"
         };
         frame.render_widget(
-            Paragraph::new(message).style(Style::default().fg(MUTED)),
+            Paragraph::new(message).style(Style::default().fg(muted_color())),
             rows[4],
         );
     } else {
@@ -124,7 +147,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if !app.status.is_empty() {
         frame.render_widget(
             Paragraph::new(app.status.as_str())
-                .style(Style::default().fg(RED))
+                .style(Style::default().fg(error_color()))
                 .wrap(Wrap { trim: true }),
             rows[5],
         );
@@ -134,15 +157,107 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
+fn settings(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(5),
+        Constraint::Length(2),
+    ])
+    .split(area);
+    frame.render_widget(
+        Paragraph::new("settings · appearance and controls")
+            .style(Style::default().fg(text_color())),
+        rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new("←/→ or Enter change theme · Esc close")
+            .style(Style::default().fg(muted_color())),
+        rows[1],
+    );
+    let theme_line = crate::config::THEMES
+        .iter()
+        .map(|theme| {
+            if *theme == app.config.theme {
+                format!("● {theme}")
+            } else {
+                format!("○ {theme}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("   ");
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "theme  ",
+                Style::default()
+                    .fg(accent_color())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(theme_line, Style::default().fg(text_color())),
+        ])),
+        rows[2],
+    );
+    frame.render_widget(
+        Paragraph::new("keybindings · edit config.toml").style(Style::default().fg(muted_color())),
+        rows[3],
+    );
+    let keybindings = [
+        ("settings", "settings"),
+        ("search", "search"),
+        ("home", "home"),
+        ("explore", "explore"),
+        ("library", "library"),
+        ("queue", "queue / switch view"),
+        ("now_playing", "now playing"),
+        ("pause", "pause"),
+        ("next_track", "next track"),
+        ("retry_track", "retry track"),
+        ("volume_up", "volume up"),
+        ("volume_down", "volume down"),
+        ("help", "help"),
+        ("quit", "quit"),
+    ];
+    frame.render_widget(
+        Table::new(
+            keybindings.iter().map(|(action, label)| {
+                Row::new(vec![
+                    Cell::from(app.config.keybindings.get(action).unwrap_or(""))
+                        .style(Style::default().fg(accent_color())),
+                    Cell::from(*label).style(Style::default().fg(secondary_color())),
+                ])
+            }),
+            [Constraint::Length(18), Constraint::Min(1)],
+        )
+        .column_spacing(1),
+        rows[4],
+    );
+    let path = crate::config::config_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "~/.config/dymus/config.toml".into());
+    frame.render_widget(
+        Paragraph::new(format!(
+            "config: {path}\nColors and keybindings are customizable in this TOML file."
+        ))
+        .style(Style::default().fg(muted_color()))
+        .wrap(Wrap { trim: true }),
+        rows[5],
+    );
+}
+
 fn navigation(frame: &mut Frame, app: &App, area: Rect) {
     let columns = Layout::horizontal([Constraint::Min(1), Constraint::Length(22)]).split(area);
-    let active = Style::default().fg(BLUE);
-    let inactive = Style::default().fg(MUTED);
+    let active = Style::default().fg(accent_color());
+    let inactive = Style::default().fg(muted_color());
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
                 "dymus",
-                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(text_color())
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("   "),
             Span::styled("home", if app.home_focused { active } else { inactive }),
@@ -185,14 +300,18 @@ fn navigation(frame: &mut Frame, app: &App, area: Rect) {
         ])),
         columns[0],
     );
+    let hint = if app.queue.current.is_some() {
+        format!(
+            "{} now playing · {} settings · ?",
+            app.config.keybindings.now_playing, app.config.keybindings.settings
+        )
+    } else {
+        format!("{} settings · ?", app.config.keybindings.settings)
+    };
     frame.render_widget(
-        Paragraph::new(if app.queue.current.is_some() {
-            "t now playing · ?"
-        } else {
-            "h/e/l views · ?"
-        })
-        .alignment(Alignment::Right)
-        .style(inactive),
+        Paragraph::new(hint)
+            .alignment(Alignment::Right)
+            .style(inactive),
         columns[1],
     );
 }
@@ -220,16 +339,16 @@ fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
     ])
     .split(panes[2]);
     let (play_icon, play_color) = match app.playback {
-        Playback::Loading => ("…", YELLOW),
-        Playback::Paused => ("Ⅱ", YELLOW),
-        Playback::Failed => ("!", RED),
-        Playback::Playing => ("▶", GREEN),
-        Playback::Idle => ("·", MUTED),
+        Playback::Loading => ("…", warning_color()),
+        Playback::Paused => ("Ⅱ", warning_color()),
+        Playback::Failed => ("!", error_color()),
+        Playback::Playing => ("▶", good_color()),
+        Playback::Idle => ("·", muted_color()),
     };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(play_icon, Style::default().fg(play_color)),
-            Span::styled("  now playing", Style::default().fg(TEXT)),
+            Span::styled("  now playing", Style::default().fg(text_color())),
         ])),
         left[0],
     );
@@ -238,15 +357,17 @@ fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
             Paragraph::new(vec![
                 Line::from(Span::styled(
                     track.title.as_str(),
-                    Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(text_color())
+                        .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(Span::styled(
                     track.artist.as_str(),
-                    Style::default().fg(SECONDARY),
+                    Style::default().fg(secondary_color()),
                 )),
                 Line::from(Span::styled(
                     track.album.as_str(),
-                    Style::default().fg(MUTED),
+                    Style::default().fg(muted_color()),
                 )),
             ]),
             left[1],
@@ -255,7 +376,7 @@ fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
             if app.image_picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks {
                 frame.render_widget(
                     Paragraph::new("terminal image protocol unavailable")
-                        .style(Style::default().fg(MUTED)),
+                        .style(Style::default().fg(muted_color())),
                     left[2],
                 );
             } else {
@@ -268,7 +389,7 @@ fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 "cover unavailable"
             };
             frame.render_widget(
-                Paragraph::new(message).style(Style::default().fg(MUTED)),
+                Paragraph::new(message).style(Style::default().fg(muted_color())),
                 left[2],
             );
         }
@@ -278,7 +399,7 @@ fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 app.duration,
                 left[3].width as usize,
             ))
-            .style(Style::default().fg(BLUE)),
+            .style(Style::default().fg(accent_color())),
             left[3],
         );
         let duration = if app.duration > 0.0 {
@@ -295,7 +416,7 @@ fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 duration,
                 app.volume
             ))
-            .style(Style::default().fg(MUTED)),
+            .style(Style::default().fg(muted_color())),
             left[4],
         );
     }
@@ -315,7 +436,9 @@ fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         Line::from(Span::styled(
             format!("{key}  {label}"),
-            Style::default().fg(BLUE).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(accent_color())
+                .add_modifier(Modifier::BOLD),
         ))
     } else {
         tabs.into_iter()
@@ -323,9 +446,11 @@ fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(
                     format!("{text}  "),
                     if active {
-                        Style::default().fg(BLUE).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(accent_color())
+                            .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(MUTED)
+                        Style::default().fg(muted_color())
                     },
                 )
             })
@@ -366,14 +491,14 @@ fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
         subheading
     };
     frame.render_widget(
-        Paragraph::new(subheading).style(Style::default().fg(MUTED)),
+        Paragraph::new(subheading).style(Style::default().fg(muted_color())),
         right[1],
     );
     match app.now_panel {
         crate::app::NowPanel::Queue => {
             if app.queue.upcoming.is_empty() {
                 frame.render_widget(
-                    Paragraph::new("Queue is empty").style(Style::default().fg(MUTED)),
+                    Paragraph::new("Queue is empty").style(Style::default().fg(muted_color())),
                     right[2],
                 );
             } else {
@@ -391,23 +516,23 @@ fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
         crate::app::NowPanel::Lyrics => render_lyrics(frame, app, right[2]),
     }
     let mut controls = vec![
-        Span::styled("space", Style::default().fg(BLUE)),
-        Span::styled(" pause   ", Style::default().fg(MUTED)),
-        Span::styled("n", Style::default().fg(BLUE)),
-        Span::styled(" next   ", Style::default().fg(MUTED)),
-        Span::styled("←/→", Style::default().fg(BLUE)),
-        Span::styled(" seek   ", Style::default().fg(MUTED)),
-        Span::styled("−/+", Style::default().fg(BLUE)),
-        Span::styled(" volume   ", Style::default().fg(MUTED)),
-        Span::styled("tab", Style::default().fg(BLUE)),
-        Span::styled(" switch panel   ", Style::default().fg(MUTED)),
-        Span::styled("esc", Style::default().fg(BLUE)),
-        Span::styled(" back", Style::default().fg(MUTED)),
+        Span::styled("space", Style::default().fg(accent_color())),
+        Span::styled(" pause   ", Style::default().fg(muted_color())),
+        Span::styled("n", Style::default().fg(accent_color())),
+        Span::styled(" next   ", Style::default().fg(muted_color())),
+        Span::styled("←/→", Style::default().fg(accent_color())),
+        Span::styled(" seek   ", Style::default().fg(muted_color())),
+        Span::styled("−/+", Style::default().fg(accent_color())),
+        Span::styled(" volume   ", Style::default().fg(muted_color())),
+        Span::styled("tab", Style::default().fg(accent_color())),
+        Span::styled(" switch panel   ", Style::default().fg(muted_color())),
+        Span::styled("esc", Style::default().fg(accent_color())),
+        Span::styled(" back", Style::default().fg(muted_color())),
     ];
     if app.playback == Playback::Failed {
         controls.extend([
-            Span::styled("   r", Style::default().fg(BLUE)),
-            Span::styled(" retry", Style::default().fg(MUTED)),
+            Span::styled("   r", Style::default().fg(accent_color())),
+            Span::styled(" retry", Style::default().fg(muted_color())),
         ]);
     }
     frame.render_widget(Paragraph::new(Line::from(controls)), layout[1]);
@@ -432,7 +557,7 @@ fn render_visualizer(frame: &mut Frame, app: &App, area: Rect) {
     let history: Vec<Vec<f32>> = app.spectrogram_history.iter().cloned().collect();
     let rms = app.audio_rms;
     let has_audio = app.audio_available;
-    let color = BLUE;
+    let color = accent_color();
     let accent = Color::Rgb(0xbb, 0x9a, 0xf7);
     let mode = app.visualizer_mode;
     let marker = if mode == VisualizerMode::Bars {
@@ -468,7 +593,7 @@ fn render_visualizer(frame: &mut Frame, app: &App, area: Rect) {
                         };
                         ctx.draw(&CanvasLine::new(x, -height, x, height, color));
                     }
-                    ctx.draw(&CanvasLine::new(0.0, 0.0, 100.0, 0.0, MUTED));
+                    ctx.draw(&CanvasLine::new(0.0, 0.0, 100.0, 0.0, muted_color()));
                 }
                 VisualizerMode::Waveform => {
                     let mut previous = None;
@@ -492,7 +617,7 @@ fn render_visualizer(frame: &mut Frame, app: &App, area: Rect) {
                         }
                         previous = Some((x, y));
                     }
-                    ctx.draw(&CanvasLine::new(0.0, 0.0, 100.0, 0.0, MUTED));
+                    ctx.draw(&CanvasLine::new(0.0, 0.0, 100.0, 0.0, muted_color()));
                 }
                 VisualizerMode::Orbit => {
                     let points: Vec<(f64, f64)> = (0..1200)
@@ -574,7 +699,7 @@ fn render_visualizer(frame: &mut Frame, app: &App, area: Rect) {
                     }
                 }
                 VisualizerMode::Vectorscope => {
-                    let traces = [color, accent, GREEN];
+                    let traces = [color, accent, good_color()];
                     if has_audio && !scope.is_empty() {
                         let points: Vec<(f64, f64)> = scope
                             .iter()
@@ -648,13 +773,13 @@ fn render_visualizer(frame: &mut Frame, app: &App, area: Rect) {
                         let band_color = if frequency > 0.72 {
                             accent
                         } else if frequency < 0.28 {
-                            GREEN
+                            good_color()
                         } else {
                             color
                         };
                         ctx.draw(&CanvasLine::new(x, -height, x, height, band_color));
                     }
-                    ctx.draw(&CanvasLine::new(0.0, 0.0, 100.0, 0.0, MUTED));
+                    ctx.draw(&CanvasLine::new(0.0, 0.0, 100.0, 0.0, muted_color()));
                 }
             }),
         area,
@@ -671,7 +796,7 @@ fn render_lyrics(frame: &mut Frame, app: &mut App, area: Rect) {
             "No lyrics found"
         };
         frame.render_widget(
-            Paragraph::new(message).style(Style::default().fg(MUTED)),
+            Paragraph::new(message).style(Style::default().fg(muted_color())),
             area,
         );
         return;
@@ -692,10 +817,12 @@ fn render_lyrics(frame: &mut Frame, app: &mut App, area: Rect) {
             .map(|(i, line)| {
                 let spans = if Some(i) == active {
                     vec![
-                        Span::styled("▌ ", Style::default().fg(BLUE)),
+                        Span::styled("▌ ", Style::default().fg(accent_color())),
                         Span::styled(
                             line.text.as_str(),
-                            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(text_color())
+                                .add_modifier(Modifier::BOLD),
                         ),
                     ]
                 } else if active.is_some_and(|current| i < current) {
@@ -705,12 +832,16 @@ fn render_lyrics(frame: &mut Frame, app: &mut App, area: Rect) {
                     )]
                 } else {
                     let distance = active.map_or(i, |current| i.saturating_sub(current));
-                    let color = if distance <= 2 { TEXT } else { SECONDARY };
+                    let color = if distance <= 2 {
+                        text_color()
+                    } else {
+                        secondary_color()
+                    };
                     vec![Span::styled(line.text.as_str(), Style::default().fg(color))]
                 };
                 let mut spans = spans;
                 if line.text.is_empty() {
-                    spans = vec![Span::styled("♪", Style::default().fg(MUTED))];
+                    spans = vec![Span::styled("♪", Style::default().fg(muted_color()))];
                 }
                 Line::from(spans)
             })
@@ -719,14 +850,14 @@ fn render_lyrics(frame: &mut Frame, app: &mut App, area: Rect) {
     } else if let Some(plain) = &lyrics.plain {
         frame.render_widget(
             Paragraph::new(plain.as_str())
-                .style(Style::default().fg(TEXT))
+                .style(Style::default().fg(text_color()))
                 .wrap(Wrap { trim: false })
                 .scroll((app.lyrics_scroll, 0)),
             area,
         );
     } else {
         frame.render_widget(
-            Paragraph::new("Plain lyrics unavailable").style(Style::default().fg(MUTED)),
+            Paragraph::new("Plain lyrics unavailable").style(Style::default().fg(muted_color())),
             area,
         );
     }
@@ -774,12 +905,12 @@ fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
         "explore · new music"
     };
     frame.render_widget(
-        Paragraph::new(title).style(Style::default().fg(MUTED)),
+        Paragraph::new(title).style(Style::default().fg(muted_color())),
         tabs[0],
     );
     if app.discovery_loading || app.library_loading {
         frame.render_widget(
-            Paragraph::new("Loading…").style(Style::default().fg(MUTED)),
+            Paragraph::new("Loading…").style(Style::default().fg(muted_color())),
             tabs[1],
         );
         return;
@@ -787,7 +918,7 @@ fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
     if detail && app.content_detail {
         if app.results.is_empty() {
             frame.render_widget(
-                Paragraph::new("No tracks").style(Style::default().fg(MUTED)),
+                Paragraph::new("No tracks").style(Style::default().fg(muted_color())),
                 tabs[1],
             );
         } else {
@@ -809,7 +940,7 @@ fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
             ""
         };
         frame.render_widget(
-            Paragraph::new(message).style(Style::default().fg(MUTED)),
+            Paragraph::new(message).style(Style::default().fg(muted_color())),
             tabs[1],
         );
         return;
@@ -817,13 +948,17 @@ fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
     let rows = app.discovery_items.iter().map(|item| {
         Row::new(vec![
             Cell::from(item.title.as_str()),
-            Cell::from(item.detail.as_str()).style(Style::default().fg(SECONDARY)),
+            Cell::from(item.detail.as_str()).style(Style::default().fg(secondary_color())),
         ])
     });
     let table = Table::new(rows, [Constraint::Fill(2), Constraint::Fill(1)])
         .column_spacing(2)
         .highlight_symbol("› ")
-        .row_highlight_style(Style::default().fg(BLUE).add_modifier(Modifier::BOLD));
+        .row_highlight_style(
+            Style::default()
+                .fg(accent_color())
+                .add_modifier(Modifier::BOLD),
+        );
     frame.render_stateful_widget(table, tabs[1], &mut app.discovery_state);
 }
 
@@ -845,9 +980,9 @@ fn library(frame: &mut Frame, app: &mut App, area: Rect) {
                     Span::styled(
                         format!("{}{}  ", n, if i == selected { " ·" } else { "" }),
                         if i == selected {
-                            Style::default().fg(BLUE)
+                            Style::default().fg(accent_color())
                         } else {
-                            Style::default().fg(MUTED)
+                            Style::default().fg(muted_color())
                         },
                     )
                 })
@@ -858,7 +993,7 @@ fn library(frame: &mut Frame, app: &mut App, area: Rect) {
     );
     if app.library_loading {
         frame.render_widget(
-            Paragraph::new("Loading…").style(Style::default().fg(MUTED)),
+            Paragraph::new("Loading…").style(Style::default().fg(muted_color())),
             tabs[1],
         );
         return;
@@ -866,7 +1001,7 @@ fn library(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.library_detail {
         if app.results.is_empty() {
             frame.render_widget(
-                Paragraph::new("No tracks").style(Style::default().fg(MUTED)),
+                Paragraph::new("No tracks").style(Style::default().fg(muted_color())),
                 tabs[1],
             );
         } else {
@@ -888,7 +1023,7 @@ fn library(frame: &mut Frame, app: &mut App, area: Rect) {
             "".into()
         };
         frame.render_widget(
-            Paragraph::new(message).style(Style::default().fg(MUTED)),
+            Paragraph::new(message).style(Style::default().fg(muted_color())),
             tabs[1],
         );
         return;
@@ -897,14 +1032,18 @@ fn library(frame: &mut Frame, app: &mut App, area: Rect) {
         app.library_items.iter().map(|item| {
             Row::new(vec![
                 Cell::from(item.title.as_str()),
-                Cell::from(item.detail.as_str()).style(Style::default().fg(SECONDARY)),
+                Cell::from(item.detail.as_str()).style(Style::default().fg(secondary_color())),
             ])
         }),
         [Constraint::Fill(2), Constraint::Fill(1)],
     )
     .column_spacing(2)
     .highlight_symbol("› ")
-    .row_highlight_style(Style::default().fg(BLUE).add_modifier(Modifier::BOLD));
+    .row_highlight_style(
+        Style::default()
+            .fg(accent_color())
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_stateful_widget(table, tabs[1], &mut app.library_state);
 }
 
@@ -925,7 +1064,11 @@ fn search(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(Line::from(vec![
             Span::styled(
                 "/ ",
-                Style::default().fg(if app.editing { BLUE } else { MUTED }),
+                Style::default().fg(if app.editing {
+                    accent_color()
+                } else {
+                    muted_color()
+                }),
             ),
             Span::styled(
                 if placeholder {
@@ -934,9 +1077,9 @@ fn search(frame: &mut Frame, app: &App, area: Rect) {
                     visible
                 },
                 Style::default().fg(if placeholder || !app.editing {
-                    MUTED
+                    muted_color()
                 } else {
-                    TEXT
+                    text_color()
                 }),
             ),
         ])),
@@ -966,13 +1109,13 @@ fn tracks<'a>(
                     } else {
                         "  "
                     },
-                    Style::default().fg(GREEN),
+                    Style::default().fg(good_color()),
                 ),
                 Span::raw(track.title.as_str()),
             ])),
-            Cell::from(track.artist.as_str()).style(Style::default().fg(SECONDARY)),
+            Cell::from(track.artist.as_str()).style(Style::default().fg(secondary_color())),
             Cell::from(Line::from(track.duration.as_str()).alignment(Alignment::Right))
-                .style(Style::default().fg(MUTED)),
+                .style(Style::default().fg(muted_color())),
         ])
     });
     let table = Table::new(
@@ -985,7 +1128,9 @@ fn tracks<'a>(
     )
     .column_spacing(2)
     .row_highlight_style(if focused {
-        Style::default().fg(BLUE).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(accent_color())
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     })
@@ -999,10 +1144,10 @@ fn now_playing(frame: &mut Frame, app: &App, area: Rect) {
     };
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
     let (state, color) = match app.playback {
-        Playback::Loading => ("…", YELLOW),
-        Playback::Paused => ("Ⅱ", YELLOW),
-        Playback::Failed => ("!", RED),
-        _ => ("▶", GREEN),
+        Playback::Loading => ("…", warning_color()),
+        Playback::Paused => ("Ⅱ", warning_color()),
+        Playback::Failed => ("!", error_color()),
+        _ => ("▶", good_color()),
     };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -1010,7 +1155,7 @@ fn now_playing(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(track.title.as_str()),
             Span::styled(
                 format!(" — {}", track.artist),
-                Style::default().fg(SECONDARY),
+                Style::default().fg(secondary_color()),
             ),
         ])),
         rows[0],
@@ -1029,13 +1174,13 @@ fn now_playing(frame: &mut Frame, app: &App, area: Rect) {
         _ => format!("  {} / {duration}", time(app.position)),
     };
     frame.render_widget(
-        Paragraph::new(timing).style(Style::default().fg(MUTED)),
+        Paragraph::new(timing).style(Style::default().fg(muted_color())),
         columns[0],
     );
     frame.render_widget(
         Paragraph::new(format!("vol {}", app.volume))
             .alignment(Alignment::Right)
-            .style(Style::default().fg(MUTED)),
+            .style(Style::default().fg(muted_color())),
         columns[1],
     );
 }
@@ -1059,20 +1204,20 @@ fn actions(frame: &mut Frame, app: &mut App, area: Rect) {
         format!("actions · {} selected", app.marks().len())
     };
     frame.render_widget(
-        Paragraph::new(title).style(Style::default().fg(TEXT)),
+        Paragraph::new(title).style(Style::default().fg(text_color())),
         header[0],
     );
     frame.render_widget(
         Paragraph::new("esc close")
             .alignment(Alignment::Right)
-            .style(Style::default().fg(MUTED)),
+            .style(Style::default().fg(muted_color())),
         header[1],
     );
     let items = app.menu_items();
     let table = Table::new(
         items.iter().map(|item| {
             Row::new(vec![
-                Cell::from(item.key).style(Style::default().fg(MUTED)),
+                Cell::from(item.key).style(Style::default().fg(muted_color())),
                 Cell::from(item.label),
             ])
         }),
@@ -1080,7 +1225,11 @@ fn actions(frame: &mut Frame, app: &mut App, area: Rect) {
     )
     .column_spacing(1)
     .highlight_symbol("› ")
-    .row_highlight_style(Style::default().fg(BLUE).add_modifier(Modifier::BOLD));
+    .row_highlight_style(
+        Style::default()
+            .fg(accent_color())
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_stateful_widget(table, rows[2], &mut app.menu_state);
 }
 
@@ -1122,13 +1271,13 @@ fn help(frame: &mut Frame, app: &mut App, area: Rect) {
         "shortcuts"
     };
     frame.render_widget(
-        Paragraph::new(title).style(Style::default().fg(TEXT)),
+        Paragraph::new(title).style(Style::default().fg(text_color())),
         header[0],
     );
     frame.render_widget(
         Paragraph::new("esc close")
             .alignment(Alignment::Right)
-            .style(Style::default().fg(MUTED)),
+            .style(Style::default().fg(muted_color())),
         header[1],
     );
     app.help_scroll = app
@@ -1138,8 +1287,8 @@ fn help(frame: &mut Frame, app: &mut App, area: Rect) {
         Table::new(
             SHORTCUTS.iter().skip(app.help_scroll).map(|(key, action)| {
                 Row::new(vec![
-                    Cell::from(*key).style(Style::default().fg(BLUE)),
-                    Cell::from(*action).style(Style::default().fg(SECONDARY)),
+                    Cell::from(*key).style(Style::default().fg(accent_color())),
+                    Cell::from(*action).style(Style::default().fg(secondary_color())),
                 ])
             }),
             [Constraint::Length(12), Constraint::Min(1)],
@@ -1168,6 +1317,9 @@ mod tests {
             app.help = true;
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
             app.help = false;
+            app.settings_view = true;
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            app.settings_view = false;
         }
     }
 
@@ -1294,8 +1446,8 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(cell("P").fg, Color::Rgb(0x58, 0x61, 0x7e));
-        assert_eq!(cell("C").fg, TEXT);
+        assert_eq!(cell("C").fg, text_color());
         assert!(cell("C").modifier.contains(Modifier::BOLD));
-        assert_eq!(cell("F").fg, TEXT);
+        assert_eq!(cell("F").fg, text_color());
     }
 }

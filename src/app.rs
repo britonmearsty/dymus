@@ -12,6 +12,7 @@ use serde_json::json;
 use tokio::task::JoinHandle;
 
 use crate::{
+    config::{self, Config},
     innertube::{InnerTube, LibraryItem, LibraryKind},
     model::{Queue, Track},
     player::{Event, Player},
@@ -160,6 +161,8 @@ pub struct App {
     pub image_picker: ratatui_image::picker::Picker,
     pub help: bool,
     pub help_scroll: usize,
+    pub settings_view: bool,
+    pub config: Config,
     pub menu: bool,
     pub menu_state: TableState,
     pub result_marks: BTreeSet<usize>,
@@ -184,6 +187,7 @@ pub struct App {
 
 impl App {
     pub async fn new() -> Result<Self> {
+        let config = Config::load()?;
         Ok(Self {
             input: String::new(),
             editing: true,
@@ -226,6 +230,8 @@ impl App {
             image_picker: ratatui_image::picker::Picker::halfblocks(),
             help: false,
             help_scroll: 0,
+            settings_view: false,
+            config,
             menu: false,
             menu_state: TableState::default(),
             result_marks: BTreeSet::new(),
@@ -312,6 +318,34 @@ impl App {
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     self.help_scroll = self.help_scroll.saturating_sub(1)
+                }
+                _ => {}
+            }
+            return false;
+        }
+        if self.settings_view {
+            match key.code {
+                KeyCode::Esc => self.settings_view = false,
+                KeyCode::Left
+                | KeyCode::Char('h')
+                | KeyCode::Right
+                | KeyCode::Char('l')
+                | KeyCode::Enter => {
+                    let current = config::THEMES
+                        .iter()
+                        .position(|theme| *theme == self.config.theme)
+                        .unwrap_or(0);
+                    let delta: isize = if matches!(key.code, KeyCode::Left | KeyCode::Char('h')) {
+                        -1
+                    } else {
+                        1
+                    };
+                    let next = (current as isize + delta).rem_euclid(config::THEMES.len() as isize)
+                        as usize;
+                    self.config.theme = config::THEMES[next].into();
+                    if let Err(error) = self.config.save() {
+                        self.status = format!("Could not save settings: {error:#}");
+                    }
                 }
                 _ => {}
             }
@@ -456,6 +490,79 @@ impl App {
                 }
                 _ => {}
             }
+            return false;
+        }
+        if binding_matches(self.config.keybindings.get("quit"), key) {
+            return true;
+        }
+        if binding_matches(self.config.keybindings.get("settings"), key) {
+            self.settings_view = true;
+            return false;
+        }
+        if binding_matches(self.config.keybindings.get("search"), key) {
+            self.input = self.query.clone();
+            self.editing = true;
+            return false;
+        }
+        if binding_matches(self.config.keybindings.get("help"), key) {
+            self.help = true;
+            self.help_scroll = 0;
+            return false;
+        }
+        if binding_matches(self.config.keybindings.get("home"), key) {
+            self.load_discovery(false);
+            return false;
+        }
+        if binding_matches(self.config.keybindings.get("explore"), key) {
+            self.load_discovery(true);
+            return false;
+        }
+        if binding_matches(self.config.keybindings.get("library"), key) {
+            self.home_focused = false;
+            self.explore_focused = false;
+            self.content_detail = false;
+            self.queue_focused = false;
+            self.library_focused = true;
+            self.load_library(LibraryKind::Playlists);
+            return false;
+        }
+        if binding_matches(self.config.keybindings.get("queue"), key) {
+            self.queue_focused = !self.queue_focused;
+            self.library_focused = false;
+            self.home_focused = false;
+            self.explore_focused = false;
+            return false;
+        }
+        if binding_matches(self.config.keybindings.get("now_playing"), key)
+            && self.queue.current.is_some()
+        {
+            self.open_now_playing();
+            return false;
+        }
+        if binding_matches(self.config.keybindings.get("pause"), key)
+            && matches!(self.playback, Playback::Playing | Playback::Paused)
+        {
+            self.player.command(json!(["cycle", "pause"]));
+            return false;
+        }
+        if binding_matches(self.config.keybindings.get("next_track"), key) {
+            self.cancel_radio();
+            self.next();
+            return false;
+        }
+        if binding_matches(self.config.keybindings.get("retry_track"), key) {
+            self.cancel_radio();
+            if let Some(track) = self.queue.current.clone() {
+                self.play(track);
+            }
+            return false;
+        }
+        if binding_matches(self.config.keybindings.get("volume_up"), key) {
+            self.set_volume(self.volume.saturating_add(5).min(100));
+            return false;
+        }
+        if binding_matches(self.config.keybindings.get("volume_down"), key) {
+            self.set_volume(self.volume.saturating_sub(5));
             return false;
         }
         if ((!self.library_focused || self.library_detail)
@@ -1397,6 +1504,33 @@ impl App {
     }
 }
 
+fn binding_matches(binding: Option<&str>, key: KeyEvent) -> bool {
+    let Some(binding) = binding else {
+        return false;
+    };
+    let normalized = binding.to_ascii_lowercase();
+    match normalized.as_str() {
+        "space" => key.code == KeyCode::Char(' '),
+        "enter" => key.code == KeyCode::Enter,
+        "esc" | "escape" => key.code == KeyCode::Esc,
+        "tab" => key.code == KeyCode::Tab,
+        "backtab" => key.code == KeyCode::BackTab,
+        "up" => key.code == KeyCode::Up,
+        "down" => key.code == KeyCode::Down,
+        "left" => key.code == KeyCode::Left,
+        "right" => key.code == KeyCode::Right,
+        "ctrl+u" => key.code == KeyCode::Char('u') && key.modifiers.contains(KeyModifiers::CONTROL),
+        value if value.starts_with("ctrl+") => value.chars().last().is_some_and(|ch| {
+            key.code == KeyCode::Char(ch) && key.modifiers.contains(KeyModifiers::CONTROL)
+        }),
+        _ if binding.chars().count() == 1 => binding
+            .chars()
+            .next()
+            .is_some_and(|ch| key.code == KeyCode::Char(ch)),
+        _ => false,
+    }
+}
+
 impl Drop for App {
     fn drop(&mut self) {
         self.cancel_radio();
@@ -1474,6 +1608,27 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!app.now_playing_view);
         assert!(!app.cover_loading);
+    }
+
+    #[tokio::test]
+    async fn configured_shortcuts_open_settings_and_search() {
+        let mut app = populated_app().await;
+        app.config.keybindings.settings = ";".into();
+        app.handle_key(KeyEvent::new(KeyCode::Char(';'), KeyModifiers::NONE));
+        assert!(app.settings_view);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.settings_view);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char(';'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.config.theme, "catppuccin-mocha");
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        app.config.keybindings.search = "f".into();
+        app.query = "saved query".into();
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(app.editing);
+        assert_eq!(app.input, "saved query");
     }
 
     #[tokio::test]
