@@ -1,16 +1,18 @@
 mod app;
 mod auth;
+mod cache;
 mod config;
 mod innertube;
 mod lyrics;
 mod model;
 mod player;
+mod radio;
 mod ui;
 mod visualizer;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use std::io::IsTerminal;
+use std::{io::IsTerminal, time::Duration};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -91,12 +93,16 @@ async fn main() -> Result<()> {
                     "The TUI needs an interactive terminal. Use `dymus search <query>` or `dymus doctor` instead."
                 );
             }
-            doctor().await?;
             let mut app = app::App::new().await?;
             app.start();
             let mut terminal = ratatui::init();
-            app.image_picker = ratatui_image::picker::Picker::from_query_stdio()
-                .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+            app.image_picker = ratatui_image::picker::Picker::from_query_stdio_with_options(
+                ratatui_image::picker::cap_parser::QueryStdioOptions {
+                    timeout: Duration::from_millis(150),
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
             let result = app.run(&mut terminal).await;
             ratatui::restore();
             app.shutdown().await;

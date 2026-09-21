@@ -4,6 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::HashSet, time::Duration};
 
@@ -21,7 +22,7 @@ pub enum LibraryKind {
     Podcasts,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LibraryItem {
     pub title: String,
     pub detail: String,

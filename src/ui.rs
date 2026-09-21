@@ -79,9 +79,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
     let playing = app.queue.current.is_some();
-    let show_search =
-        (!app.queue_focused && !app.library_focused && !app.home_focused && !app.explore_focused)
-            || app.editing;
+    let show_search = app.radio_focused
+        || (!app.queue_focused
+            && !app.library_focused
+            && !app.home_focused
+            && !app.explore_focused)
+        || app.editing;
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -97,6 +100,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     .split(inner);
     navigation(frame, app, rows[0]);
     let mut context = Vec::new();
+    if app.radio_focused {
+        context.push(radio_filter_summary(app));
+    }
     if !app.marks().is_empty() {
         context.push(format!("{} selected", app.marks().len()));
     }
@@ -108,12 +114,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         rows[1],
     );
     if show_search {
-        search(frame, app, rows[2]);
+        if app.radio_focused {
+            radio_search(frame, app, rows[2]);
+        } else {
+            search(frame, app, rows[2]);
+        }
     }
     if app.home_focused || app.explore_focused {
         discovery(frame, app, rows[4]);
     } else if app.library_focused {
         library(frame, app, rows[4]);
+    } else if app.radio_focused {
+        radio_view(frame, app, rows[4]);
     } else if app.queue_focused {
         if app.queue.upcoming.is_empty() {
             frame.render_widget(
@@ -256,6 +268,7 @@ fn settings(frame: &mut Frame, app: &App, area: Rect) {
         ("albums", "albums"),
         ("artists", "artists"),
         ("podcasts", "podcasts"),
+        ("radio", "world radio"),
         ("queue", "queue / switch view"),
         ("now_playing", "now playing"),
         ("pause", "pause"),
@@ -296,56 +309,59 @@ fn settings(frame: &mut Frame, app: &App, area: Rect) {
 fn navigation(frame: &mut Frame, app: &App, area: Rect) {
     let active = Style::default().fg(accent_color());
     let inactive = Style::default().fg(muted_color());
-    let search_active =
-        !app.home_focused && !app.explore_focused && !app.library_focused && !app.queue_focused;
-    let labels: [&str; 9] = if area.width >= 84 {
+    let search_active = !app.home_focused
+        && !app.explore_focused
+        && !app.library_focused
+        && !app.radio_focused
+        && !app.queue_focused;
+    let labels: [&str; 9] = if area.width >= 90 {
         [
-            "dymus",
             "home",
             "explore",
             "playlists",
             "albums",
             "artists",
             "podcasts",
+            "radio",
             "search",
             "queue",
         ]
-    } else if area.width >= 79 {
+    } else if area.width >= 84 {
         [
-            "dymus", "home", "explore", "lists", "albums", "artists", "pods", "search", "queue",
+            "home", "explore", "lists", "albums", "artists", "pods", "radio", "search", "queue",
         ]
-    } else if area.width >= 57 {
+    } else if area.width >= 70 {
         [
-            "dymus", "home", "exp", "lists", "alb", "art", "pod", "search", "queue",
+            "home", "exp", "lists", "alb", "art", "pod", "radio", "search", "queue",
         ]
     } else {
-        ["dymus", "H", "E", "P", "A", "R", "D", "S", "Q"]
+        ["H", "E", "P", "A", "R", "D", "O", "S", "Q"]
     };
     let keys = [
-        "",
         app.config.keybindings.home.as_str(),
         app.config.keybindings.explore.as_str(),
         app.config.keybindings.playlists.as_str(),
         app.config.keybindings.albums.as_str(),
         app.config.keybindings.artists.as_str(),
         app.config.keybindings.podcasts.as_str(),
+        app.config.keybindings.radio.as_str(),
         app.config.keybindings.search.as_str(),
         app.config.keybindings.queue.as_str(),
     ];
     let selected = [
-        false,
         app.home_focused,
         app.explore_focused,
         app.library_focused && app.library_kind == crate::innertube::LibraryKind::Playlists,
         app.library_focused && app.library_kind == crate::innertube::LibraryKind::Albums,
         app.library_focused && app.library_kind == crate::innertube::LibraryKind::Artists,
         app.library_focused && app.library_kind == crate::innertube::LibraryKind::Podcasts,
+        app.radio_focused,
         search_active,
         app.queue_focused,
     ];
     let mut spans = Vec::with_capacity(labels.len() * 4);
     for (index, ((label, key), is_selected)) in labels.iter().zip(keys).zip(selected).enumerate() {
-        if index == 3 || index == 7 {
+        if index == 2 || index == 6 {
             if area.width >= 44 {
                 spans.push(Span::styled(" · ", Style::default().fg(muted_color())));
             } else {
@@ -354,28 +370,19 @@ fn navigation(frame: &mut Frame, app: &App, area: Rect) {
         } else if index > 0 {
             spans.push(Span::raw(" "));
         }
-        if index == 0 {
-            spans.push(Span::styled(
-                *label,
-                Style::default()
-                    .fg(text_color())
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            spans.push(Span::styled(
-                key,
-                Style::default()
-                    .fg(accent_color())
-                    .add_modifier(Modifier::BOLD),
-            ));
-            if area.width >= 38 {
-                spans.push(Span::raw(" "));
-            }
-            spans.push(Span::styled(
-                *label,
-                if is_selected { active } else { inactive },
-            ));
+        spans.push(Span::styled(
+            key,
+            Style::default()
+                .fg(accent_color())
+                .add_modifier(Modifier::BOLD),
+        ));
+        if area.width >= 38 {
+            spans.push(Span::raw(" "));
         }
+        spans.push(Span::styled(
+            *label,
+            if is_selected { active } else { inactive },
+        ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -435,6 +442,20 @@ fn footer(frame: &mut Frame, app: &App, area: Rect) {
             hints.push((keys.retry_track.as_str(), "retry"));
         }
         hints
+    } else if app.radio_editing {
+        vec![("Enter", "apply filter"), ("Esc", "cancel"), ("⌫", "erase")]
+    } else if app.radio_focused {
+        vec![
+            ("Enter", "listen"),
+            ("j/k", "stations"),
+            ("/", "name"),
+            ("c", "country"),
+            ("l", "language"),
+            ("g", "genre"),
+            ("f/i", "filter focus/edit"),
+            ("z", "sort"),
+            ("x", "clear filters"),
+        ]
     } else if app.queue_focused {
         vec![
             ("j/k", "move"),
@@ -1209,6 +1230,101 @@ fn library(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(table, area, &mut app.library_state);
 }
 
+fn radio_filter_summary(app: &App) -> String {
+    let filter = &app.radio_filter;
+    let mut parts = vec![format!("world radio · {}", app.radio_sort_label())];
+    for (label, value) in [
+        ("country", filter.country.as_str()),
+        ("language", filter.language.as_str()),
+        ("genre", filter.tag.as_str()),
+    ] {
+        if !value.is_empty() {
+            parts.push(format!("{label}: {value}"));
+        }
+    }
+    parts.join(" · ")
+}
+
+fn radio_search(frame: &mut Frame, app: &App, area: Rect) {
+    let fields = ["name", "country", "language", "genre"];
+    let label = fields[app.radio_filter_field];
+    let value = if app.radio_editing {
+        app.radio_input.as_str()
+    } else {
+        match app.radio_filter_field {
+            0 => app.radio_filter.name.as_str(),
+            1 => app.radio_filter.country.as_str(),
+            2 => app.radio_filter.language.as_str(),
+            _ => app.radio_filter.tag.as_str(),
+        }
+    };
+    let cursor = if app.radio_editing { "▏" } else { "" };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("{label}: "), Style::default().fg(accent_color())),
+            Span::styled(value, Style::default().fg(text_color())),
+            Span::styled(cursor, Style::default().fg(accent_color())),
+        ])),
+        area,
+    );
+}
+
+fn radio_view(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.radio_loading {
+        frame.render_widget(
+            Paragraph::new("Finding stations around the world…")
+                .style(Style::default().fg(muted_color())),
+            area,
+        );
+        return;
+    }
+    if app.radio_stations.is_empty() {
+        let message = if app.status.is_empty() {
+            "No stations matched these filters"
+        } else {
+            ""
+        };
+        frame.render_widget(
+            Paragraph::new(message).style(Style::default().fg(muted_color())),
+            area,
+        );
+        return;
+    }
+    let rows = app.radio_stations.iter().map(|station| {
+        let location = [station.country.as_str(), station.language.as_str()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let stream = if station.bitrate > 0 {
+            format!("{} {}k", station.codec, station.bitrate)
+        } else {
+            station.codec.clone()
+        };
+        Row::new(vec![
+            Cell::from(station.name.as_str()),
+            Cell::from(location).style(Style::default().fg(secondary_color())),
+            Cell::from(stream).style(Style::default().fg(muted_color())),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Fill(3),
+            Constraint::Fill(2),
+            Constraint::Length(10),
+        ],
+    )
+    .column_spacing(2)
+    .highlight_symbol("› ")
+    .row_highlight_style(
+        Style::default()
+            .fg(accent_color())
+            .add_modifier(Modifier::BOLD),
+    );
+    frame.render_stateful_widget(table, area, &mut app.radio_state);
+}
+
 fn search(frame: &mut Frame, app: &App, area: Rect) {
     let query = if app.editing {
         app.input.as_str()
@@ -1405,6 +1521,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
         "h/e · 1–4",
         "Home / Explore / Playlists / Albums / Artists / Podcasts",
     ),
+    ("o", "World radio"),
     ("Enter · Esc", "Open an item / return from its detail"),
     ("t · q/v/y · Tab", "Now-playing view · switch right pane"),
     ("Shift+Tab", "Previous Now-playing panel"),
@@ -1505,6 +1622,32 @@ mod tests {
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("remove"));
         assert!(text.contains("reorder"));
+    }
+
+    #[tokio::test]
+    async fn radio_view_shows_station_filters_and_contextual_hints() {
+        let mut app = App::new().await.unwrap();
+        app.radio_focused = true;
+        app.radio_filter.country = "Kenya".into();
+        app.radio_stations = vec![crate::radio::Station {
+            stationuuid: "station".into(),
+            name: "Global Jazz".into(),
+            url_resolved: "https://radio.example/live".into(),
+            country: "Kenya".into(),
+            language: "English".into(),
+            tags: "jazz".into(),
+            codec: "MP3".into(),
+            bitrate: 128,
+            ..Default::default()
+        }];
+        app.radio_state.select(Some(0));
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("Global Jazz"));
+        assert!(text.contains("country: Kenya"));
+        assert!(text.contains("listen"));
+        assert!(text.contains("genre"));
     }
 
     #[tokio::test]

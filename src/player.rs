@@ -88,6 +88,13 @@ impl Drop for Player {
 }
 
 async fn resolve(video_id: &str) -> Result<String> {
+    if let Some(stream_url) = video_id.strip_prefix("radio:") {
+        anyhow::ensure!(
+            stream_url.starts_with("https://") || stream_url.starts_with("http://"),
+            "Radio station has an invalid stream URL"
+        );
+        return Ok(stream_url.to_owned());
+    }
     let output = tokio::time::timeout(
         Duration::from_secs(45),
         Command::new("yt-dlp")
@@ -314,6 +321,13 @@ async fn write_command(write: &mut tokio::net::unix::OwnedWriteHalf, command: Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn radio_streams_skip_youtube_resolution() {
+        let source = resolve("radio:https://stream.example/live").await.unwrap();
+        assert_eq!(source, "https://stream.example/live");
+        assert!(resolve("radio:not-a-url").await.is_err());
+    }
 
     #[tokio::test]
     #[ignore = "requires YouTube network access, yt-dlp, mpv and a local Unix socket"]

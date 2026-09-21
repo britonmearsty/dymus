@@ -12,10 +12,12 @@ use serde_json::json;
 use tokio::task::JoinHandle;
 
 use crate::{
+    cache,
     config::{self, Config},
     innertube::{InnerTube, LibraryItem, LibraryKind},
     model::{Queue, Track},
     player::{Event, Player},
+    radio::{RadioBrowser, Station, StationFilter},
     ui,
 };
 
@@ -136,6 +138,15 @@ pub struct App {
     pub library_loading: bool,
     pub home_focused: bool,
     pub explore_focused: bool,
+    pub radio_focused: bool,
+    pub radio_editing: bool,
+    pub radio_filter_field: usize,
+    pub radio_sort_index: usize,
+    pub radio_input: String,
+    pub radio_filter: StationFilter,
+    pub radio_stations: Vec<Station>,
+    pub radio_state: TableState,
+    pub radio_loading: bool,
     pub discovery_items: Vec<LibraryItem>,
     pub discovery_state: TableState,
     pub discovery_loading: bool,
@@ -176,12 +187,14 @@ pub struct App {
     pub volume: u8,
     api: InnerTube,
     player: Player,
+    radio_api: RadioBrowser,
     generation: u64,
     search_task: Option<JoinHandle<Result<Vec<Track>>>>,
     radio_task: Option<JoinHandle<Result<Vec<Track>>>>,
     library_task: Option<JoinHandle<Result<Vec<LibraryItem>>>>,
     detail_task: Option<JoinHandle<Result<Vec<Track>>>>,
     discovery_task: Option<JoinHandle<Result<Vec<LibraryItem>>>>,
+    stations_task: Option<JoinHandle<Result<Vec<Station>>>>,
     cover_task: Option<JoinHandle<(u64, Option<CoverArt>)>>,
     lyrics_task: Option<JoinHandle<(u64, Result<Option<crate::lyrics::Lyrics>>)>>,
 }
@@ -206,6 +219,15 @@ impl App {
             library_loading: false,
             home_focused: false,
             explore_focused: false,
+            radio_focused: false,
+            radio_editing: false,
+            radio_filter_field: 0,
+            radio_sort_index: 0,
+            radio_input: String::new(),
+            radio_filter: StationFilter::default(),
+            radio_stations: Vec::new(),
+            radio_state: TableState::default(),
+            radio_loading: false,
             discovery_items: Vec::new(),
             discovery_state: TableState::default(),
             discovery_loading: false,
@@ -246,12 +268,14 @@ impl App {
             volume: 70,
             api: InnerTube::configured()?,
             player: Player::new(),
+            radio_api: RadioBrowser::new()?,
             generation: 0,
             search_task: None,
             radio_task: None,
             library_task: None,
             detail_task: None,
             discovery_task: None,
+            stations_task: None,
             cover_task: None,
             lyrics_task: None,
         })
@@ -311,6 +335,14 @@ impl App {
                 #[cfg(not(test))]
                 self.load_library(LibraryKind::Podcasts);
             }
+            "radio" => {
+                #[cfg(test)]
+                {
+                    self.radio_focused = true;
+                }
+                #[cfg(not(test))]
+                self.load_radio();
+            }
             "queue" => {
                 self.editing = false;
                 self.queue_focused = true;
@@ -348,6 +380,7 @@ impl App {
                 }
             }
             self.poll_radio().await;
+            self.poll_stations().await;
             self.poll_library().await;
             self.poll_discovery().await;
             self.poll_cover().await;
@@ -549,6 +582,27 @@ impl App {
                 _ => {}
             }
         }
+        if self.radio_editing {
+            match key.code {
+                KeyCode::Esc => {
+                    self.radio_editing = false;
+                    self.radio_input.clear();
+                }
+                KeyCode::Enter => self.commit_radio_filter(),
+                KeyCode::Backspace => {
+                    self.radio_input.pop();
+                }
+                KeyCode::Char(c)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    self.radio_input.push(c);
+                }
+                _ => {}
+            }
+            return false;
+        }
         if self.editing {
             match key.code {
                 KeyCode::Esc => self.editing = false,
@@ -579,6 +633,10 @@ impl App {
             return false;
         }
         if binding_matches(self.config.keybindings.get("search"), key) {
+            if self.radio_focused {
+                self.edit_radio_filter(0);
+                return false;
+            }
             self.input = self.query.clone();
             self.editing = true;
             return false;
@@ -611,11 +669,16 @@ impl App {
                 return false;
             }
         }
+        if !self.now_playing_view && binding_matches(self.config.keybindings.get("radio"), key) {
+            self.load_radio();
+            return false;
+        }
         if binding_matches(self.config.keybindings.get("queue"), key) {
             self.queue_focused = !self.queue_focused;
             self.library_focused = false;
             self.home_focused = false;
             self.explore_focused = false;
+            self.radio_focused = false;
             return false;
         }
         if binding_matches(self.config.keybindings.get("now_playing"), key)
@@ -648,6 +711,37 @@ impl App {
         }
         if binding_matches(self.config.keybindings.get("volume_down"), key) {
             self.set_volume(self.volume.saturating_sub(5));
+            return false;
+        }
+        if self.radio_focused {
+            match key.code {
+                KeyCode::Esc => self.status.clear(),
+                KeyCode::Char('/') => self.edit_radio_filter(0),
+                KeyCode::Char('c') => self.edit_radio_filter(1),
+                KeyCode::Char('l') => self.edit_radio_filter(2),
+                KeyCode::Char('g') => self.edit_radio_filter(3),
+                KeyCode::Char('f') => self.radio_filter_field = (self.radio_filter_field + 1) % 4,
+                KeyCode::Char('i') => self.edit_radio_filter(self.radio_filter_field),
+                KeyCode::Char('z') => self.cycle_radio_sort(),
+                KeyCode::Char('x') => {
+                    self.radio_filter = StationFilter::default();
+                    self.radio_filter_field = 0;
+                    self.radio_sort_index = 0;
+                    self.refresh_stations();
+                }
+                KeyCode::Down | KeyCode::Char('j') => self.radio_state.select(moved(
+                    self.radio_state.selected(),
+                    self.radio_stations.len(),
+                    1,
+                )),
+                KeyCode::Up | KeyCode::Char('k') => self.radio_state.select(moved(
+                    self.radio_state.selected(),
+                    self.radio_stations.len(),
+                    -1,
+                )),
+                KeyCode::Enter => self.play_radio_station(),
+                _ => {}
+            }
             return false;
         }
         if ((!self.library_focused || self.library_detail)
@@ -707,6 +801,7 @@ impl App {
                 self.library_focused = false;
                 self.home_focused = false;
                 self.explore_focused = false;
+                self.radio_focused = false;
             }
             KeyCode::Char('l') => {
                 self.home_focused = false;
@@ -1041,6 +1136,123 @@ impl App {
         }
     }
 
+    fn load_radio(&mut self) {
+        self.editing = false;
+        self.radio_editing = false;
+        self.radio_focused = true;
+        self.home_focused = false;
+        self.explore_focused = false;
+        self.library_focused = false;
+        self.library_detail = false;
+        self.content_detail = false;
+        self.queue_focused = false;
+        self.status.clear();
+        if self.radio_stations.is_empty() && !self.radio_loading {
+            self.refresh_stations();
+        }
+    }
+
+    fn refresh_stations(&mut self) {
+        if let Some(task) = self.stations_task.take() {
+            task.abort();
+        }
+        let api = self.radio_api.clone();
+        let filter = self.radio_filter.clone();
+        self.radio_loading = true;
+        self.status.clear();
+        self.stations_task = Some(tokio::spawn(async move { api.search(&filter).await }));
+    }
+
+    fn edit_radio_filter(&mut self, field: usize) {
+        self.radio_filter_field = field.min(3);
+        self.radio_input = match self.radio_filter_field {
+            0 => self.radio_filter.name.clone(),
+            1 => self.radio_filter.country.clone(),
+            2 => self.radio_filter.language.clone(),
+            _ => self.radio_filter.tag.clone(),
+        };
+        self.radio_editing = true;
+    }
+
+    fn commit_radio_filter(&mut self) {
+        let value = self.radio_input.trim().to_owned();
+        match self.radio_filter_field {
+            0 => self.radio_filter.name = value,
+            1 => self.radio_filter.country = value,
+            2 => self.radio_filter.language = value,
+            _ => self.radio_filter.tag = value,
+        }
+        self.radio_input.clear();
+        self.radio_editing = false;
+        self.radio_state.select(None);
+        self.refresh_stations();
+    }
+
+    fn cycle_radio_sort(&mut self) {
+        const SORTS: [&str; 5] = ["clickcount", "clicktrend", "votes", "bitrate", "name"];
+        self.radio_filter.order = SORTS[(self.radio_sort_index + 1) % SORTS.len()].into();
+        self.radio_sort_index = (self.radio_sort_index + 1) % SORTS.len();
+        self.radio_state.select(None);
+        self.refresh_stations();
+    }
+
+    pub fn radio_sort_label(&self) -> &'static str {
+        ["popular", "trending", "most voted", "bitrate", "A–Z"][self.radio_sort_index]
+    }
+
+    async fn poll_stations(&mut self) {
+        if self
+            .stations_task
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            self.radio_loading = false;
+            match self.stations_task.take().unwrap().await {
+                Ok(Ok(stations)) => {
+                    self.radio_stations = stations;
+                    self.radio_state
+                        .select((!self.radio_stations.is_empty()).then_some(0));
+                    self.status.clear();
+                }
+                Ok(Err(error)) => self.status = format!("Radio search failed: {error:#}"),
+                Err(error) => self.status = format!("Radio search failed: {error}"),
+            }
+        }
+    }
+
+    fn play_radio_station(&mut self) {
+        let Some(station) = self
+            .radio_state
+            .selected()
+            .and_then(|index| self.radio_stations.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        if station.url_resolved.trim().is_empty() {
+            self.status = "This station has no playable stream URL".into();
+            return;
+        }
+        let api = self.radio_api.clone();
+        let uuid = station.stationuuid.clone();
+        tokio::spawn(async move { api.count_click(&uuid).await });
+        self.queue.upcoming.clear();
+        self.queue_marks.clear();
+        self.result_marks.clear();
+        self.queue.current = None;
+        self.play(Track {
+            id: format!("radio:{}", station.url_resolved),
+            title: station.name,
+            artist: if station.country.is_empty() {
+                "Internet radio".into()
+            } else {
+                station.country
+            },
+            album: station.tags,
+            duration: String::new(),
+        });
+    }
+
     fn search(&mut self) {
         let query = self.input.trim().to_owned();
         if query.is_empty() {
@@ -1055,6 +1267,7 @@ impl App {
         self.library_focused = false;
         self.home_focused = false;
         self.explore_focused = false;
+        self.radio_focused = false;
         self.content_detail = false;
         self.searching = true;
         self.results.clear();
@@ -1079,6 +1292,7 @@ impl App {
         self.library_focused = true;
         self.home_focused = false;
         self.explore_focused = false;
+        self.radio_focused = false;
         self.content_detail = false;
         self.library_kind = kind;
         self.library_detail = false;
@@ -1120,15 +1334,26 @@ impl App {
         self.library_focused = false;
         self.home_focused = !explore;
         self.explore_focused = explore;
+        self.radio_focused = false;
         self.library_detail = false;
         self.content_detail = false;
-        self.discovery_items.clear();
-        self.discovery_state.select(None);
+        if let Some(items) = cache::load_discovery(explore) {
+            self.discovery_items = items;
+            self.discovery_state
+                .select((!self.discovery_items.is_empty()).then_some(0));
+        } else {
+            self.discovery_items.clear();
+            self.discovery_state.select(None);
+        }
         self.discovery_loading = true;
         self.result_marks.clear();
         self.status.clear();
         let api = self.api.clone();
-        self.discovery_task = Some(tokio::spawn(async move { api.discover(explore).await }));
+        self.discovery_task = Some(tokio::spawn(async move {
+            let items = api.discover(explore).await?;
+            cache::store_discovery(explore, &items);
+            Ok(items)
+        }));
     }
 
     fn open_discovery_item(&mut self) {
@@ -1258,6 +1483,9 @@ impl App {
         let Some(track) = self.queue.current.as_ref() else {
             return;
         };
+        if track.id.starts_with("radio:") {
+            return;
+        }
         let (title, artist, album, duration) = (
             track.title.clone(),
             track.artist.clone(),
@@ -1315,6 +1543,9 @@ impl App {
         let Some(track) = self.queue.current.as_ref() else {
             return;
         };
+        if track.id.starts_with("radio:") {
+            return;
+        }
         self.cover_loading = true;
         let video_id = track.id.clone();
         let generation = self.generation;
@@ -1733,6 +1964,61 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
             assert!(app.library_focused);
             assert_eq!(app.library_kind, kind);
+        }
+    }
+
+    #[tokio::test]
+    async fn radio_filters_and_station_selection_are_independent_from_music_search() {
+        let mut app = populated_app().await;
+        app.radio_focused = true;
+        app.radio_stations = vec![crate::radio::Station {
+            stationuuid: "station".into(),
+            name: "Global Jazz".into(),
+            url_resolved: "https://radio.example/live".into(),
+            country: "Kenya".into(),
+            language: "English".into(),
+            tags: "jazz".into(),
+            codec: "MP3".into(),
+            bitrate: 128,
+            ..Default::default()
+        }];
+        app.radio_state.select(Some(0));
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(app.radio_editing);
+        assert_eq!(app.radio_filter_field, 1);
+        app.handle_key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.radio_filter.country, "K");
+        assert!(app.radio_loading);
+        if let Some(task) = app.stations_task.take() {
+            task.abort();
+        }
+        app.radio_loading = false;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert_eq!(app.radio_sort_label(), "trending");
+        if let Some(task) = app.stations_task.take() {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn radio_destination_loads_radio_browser_and_clears_filters() {
+        let mut app = populated_app().await;
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert!(app.radio_focused);
+        assert!(app.radio_loading);
+        if let Some(task) = app.stations_task.take() {
+            task.abort();
+        }
+        app.radio_loading = false;
+
+        app.radio_filter.country = "kenya".into();
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.radio_filter.country.is_empty());
+        assert!(app.radio_loading);
+        if let Some(task) = app.stations_task.take() {
+            task.abort();
         }
     }
 

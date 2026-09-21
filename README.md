@@ -27,6 +27,11 @@ cargo build --release
 ./target/release/dymus
 ```
 
+Dymus keeps the last successful Home and Explore feeds in
+`$XDG_CACHE_HOME/dymus` (normally `~/.cache/dymus`). On the next launch it
+shows that feed immediately, then refreshes it from YouTube Music in the
+background.
+
 Search without opening the TUI (returns JSON):
 
 ```sh
@@ -146,13 +151,13 @@ Dymus creates `$XDG_CONFIG_HOME/dymus/config.toml` (normally
 `~/.config/dymus/config.toml`). Press `s` to open Settings. Up/Down selects the
 theme or startup view; Left/Right changes it, and the selection is saved
 immediately. The default startup view is Home. Choose Home, Explore, Playlists,
-Albums, Artists, Podcasts, Search, or Queue. Built-in themes are Tokyo Night,
+Albums, Artists, Podcasts, World Radio, Search, or Queue. Built-in themes are Tokyo Night,
 Catppuccin Mocha, Gruvbox Dark, and Nord. The app keeps the terminal's default
 background for transparency.
 
 The TOML file also accepts optional six-digit hex color overrides and custom
 keys for settings, search, help, Home, Explore, Playlists, Albums, Artists,
-Podcasts, queue, Now Playing, pause, next, retry, volume, and quit. Key values
+Podcasts, World Radio, queue, Now Playing, pause, next, retry, volume, and quit. Key values
 accept a character or names such as `Tab`, `Space`, `Enter`, `Esc`, `Left`, and
 `Ctrl+U`. For example:
 
@@ -171,16 +176,26 @@ playlists = "1"
 albums = "2"
 artists = "3"
 podcasts = "4"
+radio = "o"
 next_track = "n"
 ```
 
 For custom colors, remove the leading `#` comment from entries in the generated
 file's `[colors]` example. Restart Dymus after editing keybindings or colors.
 
+## World radio
+
+Press `o` to browse live stations through Radio Browser. The default list is
+sorted by popularity and only includes stations the directory reports as
+working. Use `/`, `c`, `l`, and `g` to filter by station name, country,
+language, and genre. `z` cycles popularity, trending, votes, bitrate, and
+alphabetical sort; `x` clears filters. Press Enter to play the selected station
+directly.
+
 ## Phase 1 features and boundaries
 
 - Search and open public YouTube Music results; search currently loads one page.
-- Home, Explore, Search, Queue, and four separate authenticated collection views:
+- Home, Explore, Search, Queue, World Radio, and four separate authenticated collection views:
   Playlists, Albums, Artists, and Podcasts.
 - Background stream resolution, queue editing and bulk actions, radio, and
   automatic track advancement.
