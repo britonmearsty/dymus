@@ -500,6 +500,19 @@ fn footer(frame: &mut Frame, app: &App, area: Rect) {
                 (keys.explore.as_str(), "explore"),
             ]
         };
+        if !app.content_detail
+            && app
+                .discovery_state
+                .selected()
+                .and_then(|index| app.discovery_items.get(index))
+                .is_some_and(|item| {
+                    app.discovery_continuations
+                        .iter()
+                        .any(|continuation| continuation.section == item.section)
+                })
+        {
+            hints.push(("L", "load more"));
+        }
         hints.extend([
             ("1–4", "collections"),
             (keys.search.as_str(), "search"),
@@ -1104,16 +1117,22 @@ fn progress_bar(position: f64, duration: f64, width: usize) -> String {
 fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
     let detail = app.home_focused || app.explore_focused;
     let tabs = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
-    let title = if app.home_focused {
+    let mut title = if app.home_focused {
         "home · recommendations"
     } else {
         "explore · new music"
-    };
+    }
+    .to_owned();
+    if app.discovery_loading && !app.discovery_items.is_empty() {
+        title.push_str(" · refreshing…");
+    } else if !app.discovery_continuations.is_empty() {
+        title.push_str(" · L more");
+    }
     frame.render_widget(
         Paragraph::new(title).style(Style::default().fg(muted_color())),
         tabs[0],
     );
-    if app.discovery_loading || app.library_loading {
+    if (app.discovery_loading && app.discovery_items.is_empty()) || app.library_loading {
         frame.render_widget(
             Paragraph::new("Loading…").style(Style::default().fg(muted_color())),
             tabs[1],
@@ -1150,20 +1169,35 @@ fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
         );
         return;
     }
+    let mut previous_section = "";
     let rows = app.discovery_items.iter().map(|item| {
+        let section = if item.section == previous_section {
+            ""
+        } else {
+            previous_section = &item.section;
+            item.section.as_str()
+        };
         Row::new(vec![
+            Cell::from(section).style(Style::default().fg(muted_color())),
             Cell::from(item.title.as_str()),
             Cell::from(item.detail.as_str()).style(Style::default().fg(secondary_color())),
         ])
     });
-    let table = Table::new(rows, [Constraint::Fill(2), Constraint::Fill(1)])
-        .column_spacing(2)
-        .highlight_symbol("› ")
-        .row_highlight_style(
-            Style::default()
-                .fg(accent_color())
-                .add_modifier(Modifier::BOLD),
-        );
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(18),
+            Constraint::Fill(2),
+            Constraint::Fill(1),
+        ],
+    )
+    .column_spacing(2)
+    .highlight_symbol("› ")
+    .row_highlight_style(
+        Style::default()
+            .fg(accent_color())
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_stateful_widget(table, tabs[1], &mut app.discovery_state);
 }
 

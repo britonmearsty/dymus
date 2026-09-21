@@ -8,42 +8,42 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::innertube::LibraryItem;
+use crate::innertube::DiscoveryPage;
 
 const VERSION: u8 = 1;
 
 #[derive(Deserialize, Serialize)]
 struct DiscoveryCache {
     version: u8,
-    items: Vec<LibraryItem>,
+    page: DiscoveryPage,
 }
 
 /// Reads the most recently successful Home or Explore response. Cache failures
 /// are intentionally invisible: the normal network request remains authoritative.
-pub fn load_discovery(explore: bool) -> Option<Vec<LibraryItem>> {
+pub fn load_discovery(explore: bool) -> Option<DiscoveryPage> {
     let path = cache_path(explore).ok()?;
     load_from(&path)
 }
 
 /// Persists a successful response so the next launch can render it immediately.
-pub fn store_discovery(explore: bool, items: &[LibraryItem]) {
+pub fn store_discovery(explore: bool, page: &DiscoveryPage) {
     let Ok(path) = cache_path(explore) else {
         return;
     };
-    let _ = store_at(&path, items);
+    let _ = store_at(&path, page);
 }
 
-fn load_from(path: &Path) -> Option<Vec<LibraryItem>> {
+fn load_from(path: &Path) -> Option<DiscoveryPage> {
     let cache: DiscoveryCache = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-    (cache.version == VERSION).then_some(cache.items)
+    (cache.version == VERSION).then_some(cache.page)
 }
 
-fn store_at(path: &Path, items: &[LibraryItem]) -> anyhow::Result<()> {
+fn store_at(path: &Path, page: &DiscoveryPage) -> anyhow::Result<()> {
     let parent = path.parent().expect("cache path has a parent");
     fs::create_dir_all(parent)?;
     let body = serde_json::to_vec(&DiscoveryCache {
         version: VERSION,
-        items: items.to_vec(),
+        page: page.clone(),
     })?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     temporary.write_all(&body)?;
@@ -68,21 +68,28 @@ fn cache_path(explore: bool) -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{innertube::LibraryItem, model::track};
+    use crate::{
+        innertube::{DiscoveryPage, LibraryItem},
+        model::track,
+    };
 
     #[test]
     fn cached_discovery_round_trips_and_ignores_old_versions() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("home.json");
-        let items = vec![LibraryItem {
-            title: "Quick picks".into(),
-            detail: "For you".into(),
-            browse_id: String::new(),
-            playlist_id: String::new(),
-            track: Some(track("song")),
-        }];
-        store_at(&path, &items).unwrap();
-        assert_eq!(load_from(&path).unwrap()[0].title, "Quick picks");
+        let page = DiscoveryPage {
+            items: vec![LibraryItem {
+                section: "Quick picks".into(),
+                title: "Quick picks".into(),
+                detail: "For you".into(),
+                browse_id: String::new(),
+                playlist_id: String::new(),
+                track: Some(track("song")),
+            }],
+            continuations: Vec::new(),
+        };
+        store_at(&path, &page).unwrap();
+        assert_eq!(load_from(&path).unwrap().items[0].title, "Quick picks");
 
         fs::write(&path, r#"{"version":0,"items":[]}"#).unwrap();
         assert!(load_from(&path).is_none());

@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 use crate::{
     cache,
     config::{self, Config},
-    innertube::{InnerTube, LibraryItem, LibraryKind},
+    innertube::{DiscoveryContinuation, DiscoveryPage, InnerTube, LibraryItem, LibraryKind},
     model::{Queue, Track},
     player::{Event, Player},
     radio::{RadioBrowser, Station, StationFilter},
@@ -148,6 +148,7 @@ pub struct App {
     pub radio_state: TableState,
     pub radio_loading: bool,
     pub discovery_items: Vec<LibraryItem>,
+    pub discovery_continuations: Vec<DiscoveryContinuation>,
     pub discovery_state: TableState,
     pub discovery_loading: bool,
     pub content_detail: bool,
@@ -193,7 +194,9 @@ pub struct App {
     radio_task: Option<JoinHandle<Result<Vec<Track>>>>,
     library_task: Option<JoinHandle<Result<Vec<LibraryItem>>>>,
     detail_task: Option<JoinHandle<Result<Vec<Track>>>>,
-    discovery_task: Option<JoinHandle<Result<Vec<LibraryItem>>>>,
+    discovery_task: Option<JoinHandle<Result<DiscoveryPage>>>,
+    discovery_appending: bool,
+    discovery_append_section: Option<String>,
     stations_task: Option<JoinHandle<Result<Vec<Station>>>>,
     cover_task: Option<JoinHandle<(u64, Option<CoverArt>)>>,
     lyrics_task: Option<JoinHandle<(u64, Result<Option<crate::lyrics::Lyrics>>)>>,
@@ -229,6 +232,7 @@ impl App {
             radio_state: TableState::default(),
             radio_loading: false,
             discovery_items: Vec::new(),
+            discovery_continuations: Vec::new(),
             discovery_state: TableState::default(),
             discovery_loading: false,
             content_detail: false,
@@ -275,6 +279,8 @@ impl App {
             library_task: None,
             detail_task: None,
             discovery_task: None,
+            discovery_appending: false,
+            discovery_append_section: None,
             stations_task: None,
             cover_task: None,
             lyrics_task: None,
@@ -813,6 +819,11 @@ impl App {
             }
             KeyCode::Char('h') => self.load_discovery(false),
             KeyCode::Char('e') => self.load_discovery(true),
+            KeyCode::Char('L')
+                if (self.home_focused || self.explore_focused) && !self.content_detail =>
+            {
+                self.load_more_discovery()
+            }
             KeyCode::Enter
                 if (self.home_focused || self.explore_focused) && !self.content_detail =>
             {
@@ -1337,22 +1348,57 @@ impl App {
         self.radio_focused = false;
         self.library_detail = false;
         self.content_detail = false;
-        if let Some(items) = cache::load_discovery(explore) {
-            self.discovery_items = items;
+        if let Some(page) = cache::load_discovery(explore) {
+            self.discovery_items = page.items;
+            self.discovery_continuations = page.continuations;
             self.discovery_state
                 .select((!self.discovery_items.is_empty()).then_some(0));
         } else {
             self.discovery_items.clear();
+            self.discovery_continuations.clear();
             self.discovery_state.select(None);
         }
         self.discovery_loading = true;
         self.result_marks.clear();
         self.status.clear();
         let api = self.api.clone();
+        self.discovery_appending = false;
+        self.discovery_append_section = None;
         self.discovery_task = Some(tokio::spawn(async move {
-            let items = api.discover(explore).await?;
-            cache::store_discovery(explore, &items);
-            Ok(items)
+            let page = api.discover(explore).await?;
+            cache::store_discovery(explore, &page);
+            Ok(page)
+        }));
+    }
+
+    fn load_more_discovery(&mut self) {
+        let Some(section) = self
+            .discovery_state
+            .selected()
+            .and_then(|index| self.discovery_items.get(index))
+            .map(|item| item.section.clone())
+        else {
+            return;
+        };
+        let Some(continuation) = self
+            .discovery_continuations
+            .iter()
+            .find(|continuation| continuation.section == section)
+            .cloned()
+        else {
+            self.status = format!("No more items in {section}");
+            return;
+        };
+        if let Some(task) = self.discovery_task.take() {
+            task.abort();
+        }
+        self.discovery_loading = true;
+        self.discovery_appending = true;
+        self.discovery_append_section = Some(continuation.section.clone());
+        let api = self.api.clone();
+        self.discovery_task = Some(tokio::spawn(async move {
+            api.discover_more(&continuation.token, &continuation.section)
+                .await
         }));
     }
 
@@ -1386,8 +1432,37 @@ impl App {
         {
             self.discovery_loading = false;
             match self.discovery_task.take().unwrap().await {
-                Ok(Ok(items)) => {
-                    self.discovery_items = items;
+                Ok(Ok(page)) => {
+                    if self.discovery_appending {
+                        let section = self.discovery_append_section.take().unwrap_or_default();
+                        let mut ids = self
+                            .discovery_items
+                            .iter()
+                            .map(|item| {
+                                if item.playlist_id.is_empty() {
+                                    item.browse_id.clone()
+                                } else {
+                                    item.playlist_id.clone()
+                                }
+                            })
+                            .collect::<std::collections::HashSet<String>>();
+                        self.discovery_items
+                            .extend(page.items.into_iter().filter(|item| {
+                                let id = if item.playlist_id.is_empty() {
+                                    item.browse_id.clone()
+                                } else {
+                                    item.playlist_id.clone()
+                                };
+                                !id.is_empty() && ids.insert(id)
+                            }));
+                        self.discovery_continuations
+                            .retain(|continuation| continuation.section != section);
+                        self.discovery_continuations.extend(page.continuations);
+                    } else {
+                        self.discovery_items = page.items;
+                        self.discovery_continuations = page.continuations;
+                    }
+                    self.discovery_appending = false;
                     self.discovery_state
                         .select((!self.discovery_items.is_empty()).then_some(0));
                 }

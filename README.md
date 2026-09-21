@@ -74,9 +74,12 @@ capture is unavailable, it uses its fallback animation.
 ## Views
 
 Home and Explore contain browseable YouTube Music collections. Press Enter on a
-collection to open its tracks and Esc to return. Search contains public tracks;
-the queue contains upcoming playback. Playlists, Albums, Artists, and Podcasts
-are separate top-level signed-in views.
+collection to open its tracks and Esc to return. Rows retain their source shelf,
+so recommendations, mixes, and quick picks remain visibly separated in the
+minimal table. Press `L` on a row to load the next page for that shelf when
+YouTube Music provides one. Search contains public tracks; the queue contains
+upcoming playback. Playlists, Albums, Artists, and Podcasts are separate
+top-level signed-in views.
 
 Now Playing presents the active track, cover art, and a minimal progress bar. Its
 right panel switches between queue, visualizer, and lyrics. Synced lyrics
@@ -170,6 +173,7 @@ returns to browsing.
 | `a` / `A` | Append to queue / put next |
 | `P` / `Q` | Play all / queue all loaded songs |
 | `R` | Start generated radio from focused song |
+| `L` | Load more items from the focused Home or Explore shelf |
 | `d`, Delete | Remove focused or marked queue entries |
 | `J` / `K` | Move focused or marked queue entries down / up |
 | `C` | Clear upcoming tracks without stopping the current track |

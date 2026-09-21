@@ -24,11 +24,25 @@ pub enum LibraryKind {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LibraryItem {
+    #[serde(default)]
+    pub section: String,
     pub title: String,
     pub detail: String,
     pub browse_id: String,
     pub playlist_id: String,
     pub track: Option<Track>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DiscoveryContinuation {
+    pub section: String,
+    pub token: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct DiscoveryPage {
+    pub items: Vec<LibraryItem>,
+    pub continuations: Vec<DiscoveryContinuation>,
 }
 
 impl InnerTube {
@@ -123,7 +137,7 @@ impl InnerTube {
         Ok(items)
     }
 
-    pub async fn discover(&self, explore: bool) -> Result<Vec<LibraryItem>> {
+    pub async fn discover(&self, explore: bool) -> Result<DiscoveryPage> {
         let browse_id = if explore {
             "FEmusic_explore"
         } else {
@@ -132,10 +146,14 @@ impl InnerTube {
         let response = self
             .request("browse", json!({"browseId": browse_id}))
             .await?;
-        let mut items = Vec::new();
-        let mut seen = HashSet::new();
-        collect_library_items(&response, &mut items, &mut seen);
-        Ok(items)
+        parse_discovery(&response, None)
+    }
+
+    pub async fn discover_more(&self, token: &str, section: &str) -> Result<DiscoveryPage> {
+        let response = self
+            .request("browse", json!({"continuation": token}))
+            .await?;
+        parse_discovery(&response, Some(section))
     }
 
     pub async fn library_tracks(&self, item: &LibraryItem) -> Result<Vec<Track>> {
@@ -198,6 +216,7 @@ fn collect_library_items(value: &Value, items: &mut Vec<LibraryItem>, seen: &mut
             for key in [
                 "musicTwoRowItemRenderer",
                 "musicResponsiveListItemRenderer",
+                "musicMultiRowListItemRenderer",
                 "musicPlaylistShelfRenderer",
                 "musicNavigationButtonRenderer",
             ] {
@@ -207,6 +226,22 @@ fn collect_library_items(value: &Value, items: &mut Vec<LibraryItem>, seen: &mut
                             && seen.insert(track.id.clone())
                         {
                             items.push(LibraryItem {
+                                section: String::new(),
+                                title: track.title.clone(),
+                                detail: track.artist.clone(),
+                                browse_id: String::new(),
+                                playlist_id: String::new(),
+                                track: Some(track),
+                            });
+                        }
+                        return;
+                    }
+                    if key == "musicMultiRowListItemRenderer" {
+                        if let Some(track) = parse_multi_row_track(item)
+                            && seen.insert(track.id.clone())
+                        {
+                            items.push(LibraryItem {
+                                section: String::new(),
                                 title: track.title.clone(),
                                 detail: track.artist.clone(),
                                 browse_id: String::new(),
@@ -234,12 +269,20 @@ fn collect_library_items(value: &Value, items: &mut Vec<LibraryItem>, seen: &mut
                             )
                             .and_then(Value::as_str)
                         })
+                        .or_else(|| {
+                            item.pointer("/buttonCommand/watchPlaylistEndpoint/playlistId")
+                                .and_then(Value::as_str)
+                        })
                         .unwrap_or("");
                     let video_id = item
                         .pointer("/navigationEndpoint/watchEndpoint/videoId")
                         .and_then(Value::as_str)
                         .or_else(|| {
                             item.pointer("/title/runs/0/navigationEndpoint/watchEndpoint/videoId")
+                                .and_then(Value::as_str)
+                        })
+                        .or_else(|| {
+                            item.pointer("/buttonCommand/watchEndpoint/videoId")
                                 .and_then(Value::as_str)
                         })
                         .unwrap_or("");
@@ -253,6 +296,7 @@ fn collect_library_items(value: &Value, items: &mut Vec<LibraryItem>, seen: &mut
                     if !title.is_empty() && !id.is_empty() && seen.insert(id.to_owned()) {
                         let detail = item.pointer("/subtitle/runs").and_then(Value::as_array).map(|runs| text_runs(runs)).or_else(|| item.pointer("/flexColumns/1/musicResponsiveListItemFlexColumnRenderer/text/runs").and_then(Value::as_array).map(|runs| text_runs(runs))).unwrap_or_default();
                         items.push(LibraryItem {
+                            section: String::new(),
                             title: title.into(),
                             detail,
                             browse_id: browse.into(),
@@ -284,6 +328,151 @@ fn collect_library_items(value: &Value, items: &mut Vec<LibraryItem>, seen: &mut
         }
         _ => {}
     }
+}
+
+fn parse_discovery(response: &Value, fallback_section: Option<&str>) -> Result<DiscoveryPage> {
+    let shelf_continuation = response.pointer("/continuationContents/musicShelfContinuation");
+    let sections = response
+        .pointer("/contents/singleColumnBrowseResultsRenderer/tabs")
+        .and_then(Value::as_array)
+        .and_then(|tabs| {
+            tabs.iter()
+                .find_map(|tab| tab.pointer("/tabRenderer/content/sectionListRenderer/contents"))
+        })
+        .or_else(|| response.pointer("/continuationContents/sectionListContinuation/contents"))
+        .or_else(|| response.pointer("/continuationContents/musicShelfContinuation/contents"))
+        .and_then(Value::as_array)
+        .context("Home response has no sections; the InnerTube API may have changed")?;
+    let mut page = DiscoveryPage::default();
+    let mut seen = HashSet::new();
+    if shelf_continuation.is_some() {
+        let section = fallback_section.unwrap_or("recommended");
+        for content in sections {
+            let mut items = Vec::new();
+            collect_library_items(content, &mut items, &mut seen);
+            for mut item in items {
+                item.section = section.to_owned();
+                page.items.push(item);
+            }
+        }
+        if let Some(token) = shelf_continuation.and_then(continuation_token) {
+            page.continuations.push(DiscoveryContinuation {
+                section: section.to_owned(),
+                token,
+            });
+        }
+    } else {
+        for section in sections {
+            collect_discovery_section(
+                section,
+                fallback_section.unwrap_or("recommended"),
+                &mut page,
+                &mut seen,
+            );
+        }
+        if let Some(token) = response
+            .pointer("/contents/singleColumnBrowseResultsRenderer/tabs")
+            .and_then(Value::as_array)
+            .and_then(|tabs| {
+                tabs.iter()
+                    .find_map(|tab| tab.pointer("/tabRenderer/content/sectionListRenderer"))
+            })
+            .and_then(continuation_token)
+            .or_else(|| {
+                response
+                    .pointer("/continuationContents/sectionListContinuation")
+                    .and_then(continuation_token)
+            })
+        {
+            let section = page
+                .items
+                .last()
+                .map(|item| item.section.clone())
+                .unwrap_or_else(|| fallback_section.unwrap_or("recommended").to_owned());
+            page.continuations
+                .push(DiscoveryContinuation { section, token });
+        }
+    }
+    Ok(page)
+}
+
+fn collect_discovery_section(
+    value: &Value,
+    fallback_section: &str,
+    page: &mut DiscoveryPage,
+    seen: &mut HashSet<String>,
+) {
+    if let Some(renderer) = value.get("itemSectionRenderer") {
+        if let Some(contents) = renderer.get("contents").and_then(Value::as_array) {
+            for content in contents {
+                collect_discovery_section(content, fallback_section, page, seen);
+            }
+        }
+        return;
+    }
+    let renderer = [
+        "musicCarouselShelfRenderer",
+        "musicShelfRenderer",
+        "musicImmersiveCarouselShelfRenderer",
+        "musicCardShelfRenderer",
+        "gridRenderer",
+    ]
+    .iter()
+    .find_map(|key| value.get(*key))
+    .or_else(|| value.get("musicDescriptionShelfRenderer"));
+    let Some(renderer) = renderer else {
+        return;
+    };
+    let title = shelf_title(renderer);
+    let contents = renderer
+        .get("contents")
+        .or_else(|| renderer.get("items"))
+        .or_else(|| renderer.pointer("/content/gridRenderer/items"));
+    let title = if title.trim().is_empty() {
+        fallback_section
+    } else {
+        &title
+    };
+    if let Some(contents) = contents.and_then(Value::as_array) {
+        for content in contents {
+            let mut items = Vec::new();
+            collect_library_items(content, &mut items, seen);
+            for mut item in items {
+                item.section = title.to_owned();
+                page.items.push(item);
+            }
+        }
+    }
+    if let Some(token) = continuation_token(renderer) {
+        page.continuations.push(DiscoveryContinuation {
+            section: title.to_owned(),
+            token,
+        });
+    }
+}
+
+fn shelf_title(renderer: &Value) -> String {
+    [
+        "/header/musicCarouselShelfBasicHeaderRenderer/title",
+        "/header/musicCarouselShelfBasicHeaderRenderer/strapline",
+        "/title",
+        "/header/title",
+        "/header/musicResponsiveHeaderRenderer/title",
+    ]
+    .iter()
+    .map(|pointer| rich_text(renderer.pointer(pointer).unwrap_or(&Value::Null)))
+    .find(|title| !title.trim().is_empty())
+    .unwrap_or_default()
+}
+
+fn continuation_token(value: &Value) -> Option<String> {
+    value
+        .pointer("/continuations/0/nextContinuationData/continuation")
+        .or_else(|| value.pointer("/continuations/0/reloadContinuationData/continuation"))
+        .or_else(|| value.pointer("/continuationEndpoint/continuationCommand/token"))
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 pub fn parse_search(response: &Value) -> Result<Vec<Track>> {
@@ -488,6 +677,25 @@ fn parse_track(item: &Value) -> Option<Track> {
     })
 }
 
+fn parse_multi_row_track(item: &Value) -> Option<Track> {
+    let id = item
+        .pointer("/playNavigationEndpoint/watchEndpoint/videoId")
+        .or_else(|| item.pointer("/title/runs/0/navigationEndpoint/watchEndpoint/videoId"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())?;
+    let title = rich_text(&item["title"]);
+    if title.trim().is_empty() {
+        return None;
+    }
+    Some(Track {
+        id: id.to_owned(),
+        title,
+        artist: rich_text(&item["subtitle"]),
+        album: String::new(),
+        duration: String::new(),
+    })
+}
+
 fn text_runs(runs: &[Value]) -> String {
     runs.iter().filter_map(|run| run["text"].as_str()).collect()
 }
@@ -514,6 +722,72 @@ mod tests {
         assert_eq!(items[0].playlist_id, "RDAMVMmix");
         assert_eq!(items[1].track.as_ref().unwrap().id, "song-id");
         assert_eq!(items[1].detail, "Artist");
+    }
+
+    #[test]
+    fn preserves_discovery_shelves_and_continuations() {
+        let response = json!({"contents":{"singleColumnBrowseResultsRenderer":{"tabs":[{
+            "tabRenderer":{"content":{"sectionListRenderer":{"contents":[
+                {"musicCarouselShelfRenderer":{
+                    "header":{"musicCarouselShelfBasicHeaderRenderer":{"title":{"runs":[{"text":"Made for you"}]}}},
+                    "contents":[{"musicTwoRowItemRenderer":{
+                        "title":{"runs":[{"text":"Daily Mix"}]},
+                        "navigationEndpoint":{"watchPlaylistEndpoint":{"playlistId":"RDmix"}}
+                    }}],
+                    "continuations":[{"nextContinuationData":{"continuation":"more-mixes"}}]
+                }},
+                {"musicShelfRenderer":{
+                    "title":{"runs":[{"text":"Quick picks"}]},
+                    "contents":[{"musicResponsiveListItemRenderer":{
+                        "flexColumns":[
+                            {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Song","navigationEndpoint":{"watchEndpoint":{"videoId":"song"}}}]}}},
+                            {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Artist"}]}}}
+                        ],
+                        "playlistItemData":{"videoId":"song"}
+                    }}]
+                }}
+            ]}}}
+        }]}}});
+        let page = parse_discovery(&response, None).unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].section, "Made for you");
+        assert_eq!(page.items[1].section, "Quick picks");
+        assert_eq!(page.continuations[0].token, "more-mixes");
+
+        let more = json!({"continuationContents":{"musicShelfContinuation":{
+            "contents":[{"musicTwoRowItemRenderer":{
+                "title":{"runs":[{"text":"Another mix"}]},
+                "navigationEndpoint":{"watchPlaylistEndpoint":{"playlistId":"RDmore"}}
+            }}],
+            "continuations":[{"nextContinuationData":{"continuation":"even-more"}}]
+        }}});
+        let more_page = parse_discovery(&more, Some("Made for you")).unwrap();
+        assert_eq!(more_page.items[0].section, "Made for you");
+        assert_eq!(more_page.items[0].playlist_id, "RDmore");
+        assert_eq!(more_page.continuations[0].token, "even-more");
+    }
+
+    #[test]
+    fn parses_immersive_cards_and_page_continuations() {
+        let response = json!({"contents":{"singleColumnBrowseResultsRenderer":{"tabs":[{
+            "tabRenderer":{"content":{"sectionListRenderer":{
+                "contents":[{"musicImmersiveCarouselShelfRenderer":{
+                    "header":{"musicCarouselShelfBasicHeaderRenderer":{"title":{"runs":[{"text":"Genres"}]}}},
+                    "contents":[{"musicNavigationButtonRenderer":{
+                        "buttonText":{"runs":[{"text":"Jazz"}]},
+                        "navigationEndpoint":{"browseEndpoint":{"browseId":"FEmusic_moods_and_genres_category_jazz"}}
+                    }}]
+                }}],
+                "continuations":[{"nextContinuationData":{"continuation":"next-page"}}]
+            }}}
+        }]}}});
+        let page = parse_discovery(&response, None).unwrap();
+        assert_eq!(page.items[0].section, "Genres");
+        assert_eq!(
+            page.items[0].browse_id,
+            "FEmusic_moods_and_genres_category_jazz"
+        );
+        assert_eq!(page.continuations[0].token, "next-page");
     }
 
     #[test]
@@ -568,6 +842,48 @@ mod tests {
             tracks.len()
         );
         eprintln!("Radio for {}: {} playable tracks", seed.title, tracks.len());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires YouTube Music network access"]
+    async fn live_home_has_labeled_shelves() {
+        let page = InnerTube::new().unwrap().discover(false).await.unwrap();
+        assert!(!page.items.is_empty());
+        assert!(
+            page.items
+                .iter()
+                .all(|item| !item.section.trim().is_empty())
+        );
+        eprintln!(
+            "Home: {} items across {} shelves",
+            page.items.len(),
+            page.items
+                .iter()
+                .map(|item| item.section.as_str())
+                .collect::<HashSet<_>>()
+                .len()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires YouTube Music network access"]
+    async fn live_explore_has_labeled_shelves() {
+        let page = InnerTube::new().unwrap().discover(true).await.unwrap();
+        assert!(!page.items.is_empty());
+        assert!(
+            page.items
+                .iter()
+                .all(|item| !item.section.trim().is_empty())
+        );
+        eprintln!(
+            "Explore: {} items across {} shelves",
+            page.items.len(),
+            page.items
+                .iter()
+                .map(|item| item.section.as_str())
+                .collect::<HashSet<_>>()
+                .len()
+        );
     }
 
     #[test]
