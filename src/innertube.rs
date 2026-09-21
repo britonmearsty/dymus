@@ -1,0 +1,584 @@
+use crate::{
+    auth::{self, BrowserAuth},
+    model::Track,
+};
+use anyhow::{Context, Result, bail};
+use reqwest::Client;
+use serde_json::{Value, json};
+use std::{collections::HashSet, time::Duration};
+
+#[derive(Clone)]
+pub struct InnerTube {
+    client: Client,
+    auth: Option<BrowserAuth>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LibraryKind {
+    Playlists,
+    Liked,
+    Albums,
+    Artists,
+}
+
+#[derive(Clone, Debug)]
+pub struct LibraryItem {
+    pub title: String,
+    pub detail: String,
+    pub browse_id: String,
+    pub playlist_id: String,
+    pub track: Option<Track>,
+}
+
+impl InnerTube {
+    pub fn new() -> Result<Self> {
+        Ok(Self { client: Client::builder()
+            .timeout(Duration::from_secs(20))
+            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36")
+            .build()?, auth: None })
+    }
+
+    pub fn configured() -> Result<Self> {
+        let mut client = Self::new()?;
+        client.auth = auth::load()?;
+        Ok(client)
+    }
+
+    pub fn with_auth(mut self, auth: BrowserAuth) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    pub async fn validate_session(&self) -> Result<String> {
+        anyhow::ensure!(
+            self.auth.is_some(),
+            "No YouTube Music credentials are configured; run `dymus auth paste`"
+        );
+        let response = self
+            .request("account/account_menu", json!({}))
+            .await
+            .context("Could not validate the YouTube Music session")?;
+        let account = response.pointer("/actions/0/openPopupAction/popup/multiPageMenuRenderer/header/activeAccountHeaderRenderer/accountName")
+            .and_then(|name| name.pointer("/runs/0/text").and_then(Value::as_str)
+                .or_else(|| name.get("simpleText").and_then(Value::as_str)));
+        account
+            .map(ToOwned::to_owned)
+            .context("YouTube Music did not return a signed-in account; the session may be expired or the account index may be wrong")
+    }
+
+    pub async fn search(&self, query: &str) -> Result<Vec<Track>> {
+        if query.trim().is_empty() {
+            bail!("Enter a song or artist to search");
+        }
+        let response = self
+            .request(
+                "search",
+                json!({
+                    "query": query.trim(),
+                    "params": "EgWKAQIIAWoMEA4QChADEAQQCRAF"
+                }),
+            )
+            .await?;
+        parse_search(&response)
+    }
+
+    pub async fn radio(&self, video_id: &str) -> Result<Vec<Track>> {
+        let response = self
+            .request(
+                "next",
+                json!({
+                    "videoId": video_id,
+                    "playlistId": format!("RDAMVM{video_id}"),
+                    "params": "wAEB",
+                    "isAudioOnly": true,
+                    "enablePersistentPlaylistPanel": true,
+                    "tunerSettingValue": "AUTOMIX_SETTING_NORMAL"
+                }),
+            )
+            .await?;
+        parse_radio(&response)
+    }
+
+    pub async fn library(&self, kind: LibraryKind) -> Result<Vec<LibraryItem>> {
+        anyhow::ensure!(
+            self.auth.is_some(),
+            "Library requires sign-in; run `dymus auth paste`"
+        );
+        let browse_id = match kind {
+            LibraryKind::Playlists => "FEmusic_liked_playlists",
+            LibraryKind::Liked => "FEmusic_liked_videos",
+            LibraryKind::Albums => "FEmusic_liked_albums",
+            LibraryKind::Artists => "FEmusic_library_corpus_track_artists",
+        };
+        let response = self
+            .request("browse", json!({"browseId": browse_id}))
+            .await?;
+        let mut items = Vec::new();
+        let mut seen = HashSet::new();
+        collect_library_items(&response, &mut items, &mut seen);
+        Ok(items)
+    }
+
+    pub async fn discover(&self, explore: bool) -> Result<Vec<LibraryItem>> {
+        let browse_id = if explore {
+            "FEmusic_explore"
+        } else {
+            "FEmusic_home"
+        };
+        let response = self
+            .request("browse", json!({"browseId": browse_id}))
+            .await?;
+        let mut items = Vec::new();
+        let mut seen = HashSet::new();
+        collect_library_items(&response, &mut items, &mut seen);
+        Ok(items)
+    }
+
+    pub async fn library_tracks(&self, item: &LibraryItem) -> Result<Vec<Track>> {
+        if let Some(track) = &item.track {
+            return Ok(vec![track.clone()]);
+        }
+        let body = if !item.playlist_id.is_empty() {
+            json!({"playlistId": item.playlist_id})
+        } else {
+            json!({"browseId": item.browse_id})
+        };
+        let response = self.request("browse", body).await?;
+        parse_search(&response)
+    }
+
+    async fn request(&self, endpoint: &str, mut body: Value) -> Result<Value> {
+        body["context"] = json!({ "client": {
+            "clientName": "WEB_REMIX", "clientVersion": "1.20250915.03.00",
+            "hl": "en", "gl": "US"
+        }});
+        let mut request = self
+            .client
+            .post(format!(
+                "https://music.youtube.com/youtubei/v1/{endpoint}?prettyPrint=false"
+            ))
+            .header("Origin", "https://music.youtube.com")
+            .header("Referer", "https://music.youtube.com/")
+            .json(&body);
+        if let Some(auth) = &self.auth {
+            request = request
+                .header(reqwest::header::COOKIE, auth.cookie())
+                .header("X-Goog-AuthUser", auth.auth_user())
+                .header(
+                    reqwest::header::AUTHORIZATION,
+                    auth.authorization(auth::unix_timestamp()?)?,
+                );
+        }
+        let response: Value = request
+            .send()
+            .await
+            .context("Cannot reach YouTube Music")?
+            .error_for_status()
+            .context("YouTube Music rejected the request")?
+            .json()
+            .await
+            .context("YouTube Music returned an invalid response")?;
+        if let Some(error) = response.get("error") {
+            bail!(
+                "YouTube Music: {}",
+                error["message"].as_str().unwrap_or("request failed")
+            );
+        }
+        Ok(response)
+    }
+}
+
+fn collect_library_items(value: &Value, items: &mut Vec<LibraryItem>, seen: &mut HashSet<String>) {
+    match value {
+        Value::Object(map) => {
+            for key in [
+                "musicTwoRowItemRenderer",
+                "musicResponsiveListItemRenderer",
+                "musicPlaylistShelfRenderer",
+                "musicNavigationButtonRenderer",
+            ] {
+                if let Some(item) = map.get(key) {
+                    if key == "musicResponsiveListItemRenderer" {
+                        if let Some(track) = parse_track(item)
+                            && seen.insert(track.id.clone())
+                        {
+                            items.push(LibraryItem {
+                                title: track.title.clone(),
+                                detail: track.artist.clone(),
+                                browse_id: String::new(),
+                                playlist_id: String::new(),
+                                track: Some(track),
+                            });
+                        }
+                        return;
+                    }
+                    let title = item.pointer("/title/runs/0/text").and_then(Value::as_str).or_else(|| item.pointer("/title/simpleText").and_then(Value::as_str)).or_else(|| item.pointer("/buttonText/runs/0/text").and_then(Value::as_str)).or_else(|| item.pointer("/flexColumns/0/musicResponsiveListItemFlexColumnRenderer/text/runs/0/text").and_then(Value::as_str)).unwrap_or("");
+                    let browse = item
+                        .pointer("/navigationEndpoint/browseEndpoint/browseId")
+                        .and_then(Value::as_str)
+                        .or_else(|| {
+                            item.pointer("/title/runs/0/navigationEndpoint/browseEndpoint/browseId")
+                                .and_then(Value::as_str)
+                        })
+                        .unwrap_or("");
+                    let playlist = item
+                        .pointer("/navigationEndpoint/watchPlaylistEndpoint/playlistId")
+                        .and_then(Value::as_str)
+                        .or_else(|| {
+                            item.pointer(
+                                "/title/runs/0/navigationEndpoint/watchEndpoint/playlistId",
+                            )
+                            .and_then(Value::as_str)
+                        })
+                        .unwrap_or("");
+                    let video_id = item
+                        .pointer("/navigationEndpoint/watchEndpoint/videoId")
+                        .and_then(Value::as_str)
+                        .or_else(|| {
+                            item.pointer("/title/runs/0/navigationEndpoint/watchEndpoint/videoId")
+                                .and_then(Value::as_str)
+                        })
+                        .unwrap_or("");
+                    let id = if !playlist.is_empty() {
+                        playlist
+                    } else if !browse.is_empty() {
+                        browse
+                    } else {
+                        video_id
+                    };
+                    if !title.is_empty() && !id.is_empty() && seen.insert(id.to_owned()) {
+                        let detail = item.pointer("/subtitle/runs").and_then(Value::as_array).map(|runs| text_runs(runs)).or_else(|| item.pointer("/flexColumns/1/musicResponsiveListItemFlexColumnRenderer/text/runs").and_then(Value::as_array).map(|runs| text_runs(runs))).unwrap_or_default();
+                        items.push(LibraryItem {
+                            title: title.into(),
+                            detail,
+                            browse_id: browse.into(),
+                            playlist_id: playlist.into(),
+                            track: if video_id.is_empty() {
+                                None
+                            } else {
+                                Some(Track {
+                                    id: video_id.into(),
+                                    title: title.into(),
+                                    artist: String::new(),
+                                    album: String::new(),
+                                    duration: String::new(),
+                                })
+                            },
+                        });
+                    }
+                    return;
+                }
+            }
+            for child in map.values() {
+                collect_library_items(child, items, seen);
+            }
+        }
+        Value::Array(children) => {
+            for child in children {
+                collect_library_items(child, items, seen);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn parse_search(response: &Value) -> Result<Vec<Track>> {
+    if let Some(error) = response.get("error") {
+        bail!(
+            "YouTube Music: {}",
+            error["message"].as_str().unwrap_or("request failed")
+        );
+    }
+    let contents = response
+        .get("contents")
+        .context("Search response has no contents; the InnerTube API may have changed")?;
+    let mut tracks = Vec::new();
+    let mut seen = HashSet::new();
+    collect_tracks(contents, &mut tracks, &mut seen);
+    Ok(tracks)
+}
+
+// Parse only the actual watch queue, not recommendations, menus, or alternate
+// video counterparts. Preserve YouTube's order and skip unavailable entries.
+fn parse_radio(response: &Value) -> Result<Vec<Track>> {
+    let tabs = response.pointer("/contents/singleColumnMusicWatchNextResultsRenderer/tabbedRenderer/watchNextTabbedResultsRenderer/tabs")
+        .and_then(Value::as_array).context("Radio response has no watch queue")?;
+    let entries = tabs
+        .iter()
+        .find_map(|tab| {
+            tab.pointer(
+                "/tabRenderer/content/musicQueueRenderer/content/playlistPanelRenderer/contents",
+            )
+        })
+        .and_then(Value::as_array)
+        .context("Radio response has no tracks")?;
+    let mut seen = HashSet::new();
+    let mut tracks = Vec::new();
+    for entry in entries {
+        let item = entry.get("playlistPanelVideoRenderer").or_else(|| {
+            entry.pointer(
+                "/playlistPanelVideoWrapperRenderer/primaryRenderer/playlistPanelVideoRenderer",
+            )
+        });
+        let Some(item) = item else {
+            continue;
+        };
+        if item.get("unplayableText").is_some() || item["isPlayable"] == false {
+            continue;
+        }
+        let Some(id) = item["videoId"].as_str().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        let title = rich_text(&item["title"]);
+        if title.is_empty() || !seen.insert(id.to_owned()) {
+            continue;
+        }
+        let byline = item
+            .get("longBylineText")
+            .or_else(|| item.get("shortBylineText"))
+            .unwrap_or(&Value::Null);
+        let mut artists = Vec::new();
+        let mut album = String::new();
+        if let Some(runs) = byline["runs"].as_array() {
+            for run in runs {
+                let browse = run
+                    .pointer("/navigationEndpoint/browseEndpoint/browseId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let text = run["text"].as_str().unwrap_or_default();
+                if browse.starts_with("UC") {
+                    artists.push(text);
+                }
+                if browse.starts_with("MPRE") {
+                    album = text.into();
+                }
+            }
+        }
+        let artist = if artists.is_empty() {
+            rich_text(item.get("shortBylineText").unwrap_or(byline))
+        } else {
+            artists.join(", ")
+        };
+        tracks.push(Track {
+            id: id.into(),
+            title,
+            artist,
+            album,
+            duration: rich_text(&item["lengthText"]),
+        });
+    }
+    if tracks.is_empty() {
+        bail!("YouTube Music returned no playable radio tracks");
+    }
+    Ok(tracks)
+}
+
+fn rich_text(value: &Value) -> String {
+    value["runs"]
+        .as_array()
+        .map(|runs| text_runs(runs))
+        .unwrap_or_else(|| value["simpleText"].as_str().unwrap_or_default().to_owned())
+}
+
+fn collect_tracks(value: &Value, tracks: &mut Vec<Track>, seen: &mut HashSet<String>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(item) = map.get("musicResponsiveListItemRenderer") {
+                if let Some(track) = parse_track(item)
+                    && seen.insert(track.id.clone())
+                {
+                    tracks.push(track);
+                }
+                return;
+            }
+            for child in map.values() {
+                collect_tracks(child, tracks, seen);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                collect_tracks(child, tracks, seen);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_track(item: &Value) -> Option<Track> {
+    if item["musicItemRendererDisplayPolicy"] == "MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT" {
+        return None;
+    }
+    let columns = item["flexColumns"].as_array()?;
+    let title_runs = columns
+        .first()?
+        .pointer("/musicResponsiveListItemFlexColumnRenderer/text/runs")?
+        .as_array()?;
+    let id = item.pointer("/playlistItemData/videoId")
+        .or_else(|| title_runs.first()?.pointer("/navigationEndpoint/watchEndpoint/videoId"))
+        .or_else(|| item.pointer("/overlay/musicItemThumbnailOverlayRenderer/content/musicPlayButtonRenderer/playNavigationEndpoint/watchEndpoint/videoId"))?.as_str()?;
+    if id.is_empty() {
+        return None;
+    }
+    let title = text_runs(title_runs);
+    if title.trim().is_empty() {
+        return None;
+    }
+    let runs: Vec<&Value> = columns
+        .iter()
+        .skip(1)
+        .filter_map(|column| {
+            column
+                .pointer("/musicResponsiveListItemFlexColumnRenderer/text/runs")
+                .and_then(Value::as_array)
+        })
+        .flatten()
+        .collect();
+    let mut artists = Vec::new();
+    let mut album = String::new();
+    let mut duration = String::new();
+    for run in &runs {
+        let text = run["text"].as_str().unwrap_or_default();
+        let browse_id = run
+            .pointer("/navigationEndpoint/browseEndpoint/browseId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if browse_id.starts_with("UC") {
+            artists.push(text);
+        }
+        if browse_id.starts_with("MPRE") {
+            album = text.to_owned();
+        }
+        if is_duration(text) {
+            duration = text.to_owned();
+        }
+    }
+    if duration.is_empty()
+        && let Some(fixed) = item["fixedColumns"].as_array()
+    {
+        for column in fixed {
+            if let Some(runs) = column
+                .pointer("/musicResponsiveListItemFixedColumnRenderer/text/runs")
+                .and_then(Value::as_array)
+            {
+                let text = text_runs(runs);
+                if is_duration(&text) {
+                    duration = text;
+                }
+            }
+        }
+    }
+    let artist = if artists.is_empty() {
+        runs.first()
+            .and_then(|run| run["text"].as_str())
+            .unwrap_or("Unknown artist")
+            .to_owned()
+    } else {
+        artists.join(", ")
+    };
+    Some(Track {
+        id: id.into(),
+        title,
+        artist,
+        album,
+        duration,
+    })
+}
+
+fn text_runs(runs: &[Value]) -> String {
+    runs.iter().filter_map(|run| run["text"].as_str()).collect()
+}
+fn is_duration(text: &str) -> bool {
+    text.contains(':')
+        && text
+            .split(':')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_feed_cards_and_quick_pick_tracks() {
+        let response = json!({"contents":{"items":[
+            {"musicTwoRowItemRenderer":{"title":{"runs":[{"text":"Mix"}]},"subtitle":{"runs":[{"text":"Daily mix"}]},"navigationEndpoint":{"watchPlaylistEndpoint":{"playlistId":"RDAMVMmix"}}}},
+            {"musicResponsiveListItemRenderer":{"flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Song","navigationEndpoint":{"watchEndpoint":{"videoId":"song-id"}}}]}}},{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Artist","navigationEndpoint":{"browseEndpoint":{"browseId":"UCartist"}}}]}}}],"playlistItemData":{"videoId":"song-id"}}}
+        ]}});
+        let mut items = Vec::new();
+        collect_library_items(&response, &mut items, &mut HashSet::new());
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].playlist_id, "RDAMVMmix");
+        assert_eq!(items[1].track.as_ref().unwrap().id, "song-id");
+        assert_eq!(items[1].detail, "Artist");
+    }
+    #[test]
+    fn radio_uses_primary_tracks_and_skips_duplicates_and_unavailable_items() {
+        let fixture = serde_json::from_str(include_str!("../tests/fixtures/radio.json")).unwrap();
+        let tracks = parse_radio(&fixture).unwrap();
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|track| track.id.as_str())
+                .collect::<Vec<_>>(),
+            ["seed", "related"]
+        );
+        assert_eq!(tracks[1].artist, "Artist");
+        assert_eq!(tracks[1].album, "Album");
+        assert_eq!(tracks[1].duration, "3:45");
+        assert!(parse_radio(&json!({"contents": {}})).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires YouTube Music network access"]
+    async fn live_radio_returns_related_tracks() {
+        let api = InnerTube::new().unwrap();
+        let songs = api.search("Nujabes Feather").await.unwrap();
+        let seed = songs.first().expect("search should find a seed track");
+        let tracks = api.radio(&seed.id).await.unwrap();
+        assert!(tracks.iter().any(|track| track.id != seed.id));
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|track| &track.id)
+                .collect::<HashSet<_>>()
+                .len(),
+            tracks.len()
+        );
+        eprintln!("Radio for {}: {} playable tracks", seed.title, tracks.len());
+    }
+
+    #[test]
+    fn parses_nested_results_and_deduplicates_without_menu_tracks() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/search.json")).unwrap();
+        let tracks = parse_search(&fixture).unwrap();
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(
+            tracks[0],
+            Track {
+                id: "song-one".into(),
+                title: "First song".into(),
+                artist: "First artist, Guest".into(),
+                album: "First album".into(),
+                duration: "3:42".into()
+            }
+        );
+        assert_eq!(tracks[1].id, "song-two");
+        assert_eq!(tracks[1].duration, "4:02");
+    }
+    #[test]
+    fn distinguishes_empty_results_from_api_errors() {
+        assert!(
+            parse_search(&json!({"contents": {"sectionListRenderer": {"contents": []}}}))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            parse_search(&json!({"error": {"message": "Try again"}}))
+                .unwrap_err()
+                .to_string()
+                .contains("Try again")
+        );
+        assert!(parse_search(&json!({"unexpected": []})).is_err());
+    }
+}

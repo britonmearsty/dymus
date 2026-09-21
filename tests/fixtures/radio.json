@@ -1,0 +1,239 @@
+{
+  "contents": {
+    "singleColumnMusicWatchNextResultsRenderer": {
+      "tabbedRenderer": {
+        "watchNextTabbedResultsRenderer": {
+          "tabs": [
+            {
+              "tabRenderer": {
+                "content": {
+                  "musicQueueRenderer": {
+                    "content": {
+                      "playlistPanelRenderer": {
+                        "contents": [
+                          {
+                            "playlistPanelVideoRenderer": {
+                              "videoId": "seed",
+                              "title": {
+                                "runs": [
+                                  {
+                                    "text": "Seed song"
+                                  }
+                                ]
+                              },
+                              "lengthText": {
+                                "simpleText": "3:45"
+                              },
+                              "longBylineText": {
+                                "runs": [
+                                  {
+                                    "text": "Artist",
+                                    "navigationEndpoint": {
+                                      "browseEndpoint": {
+                                        "browseId": "UCartist"
+                                      }
+                                    }
+                                  },
+                                  {
+                                    "text": " \u2022 "
+                                  },
+                                  {
+                                    "text": "Album",
+                                    "navigationEndpoint": {
+                                      "browseEndpoint": {
+                                        "browseId": "MPREalbum"
+                                      }
+                                    }
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          {
+                            "playlistPanelVideoWrapperRenderer": {
+                              "primaryRenderer": {
+                                "playlistPanelVideoRenderer": {
+                                  "videoId": "related",
+                                  "title": {
+                                    "runs": [
+                                      {
+                                        "text": "Related song"
+                                      }
+                                    ]
+                                  },
+                                  "lengthText": {
+                                    "simpleText": "3:45"
+                                  },
+                                  "longBylineText": {
+                                    "runs": [
+                                      {
+                                        "text": "Artist",
+                                        "navigationEndpoint": {
+                                          "browseEndpoint": {
+                                            "browseId": "UCartist"
+                                          }
+                                        }
+                                      },
+                                      {
+                                        "text": " \u2022 "
+                                      },
+                                      {
+                                        "text": "Album",
+                                        "navigationEndpoint": {
+                                          "browseEndpoint": {
+                                            "browseId": "MPREalbum"
+                                          }
+                                        }
+                                      }
+                                    ]
+                                  }
+                                }
+                              },
+                              "counterpart": [
+                                {
+                                  "counterpartRenderer": {
+                                    "playlistPanelVideoRenderer": {
+                                      "videoId": "video-version",
+                                      "title": {
+                                        "runs": [
+                                          {
+                                            "text": "Alternate video"
+                                          }
+                                        ]
+                                      },
+                                      "lengthText": {
+                                        "simpleText": "3:45"
+                                      },
+                                      "longBylineText": {
+                                        "runs": [
+                                          {
+                                            "text": "Artist",
+                                            "navigationEndpoint": {
+                                              "browseEndpoint": {
+                                                "browseId": "UCartist"
+                                              }
+                                            }
+                                          },
+                                          {
+                                            "text": " \u2022 "
+                                          },
+                                          {
+                                            "text": "Album",
+                                            "navigationEndpoint": {
+                                              "browseEndpoint": {
+                                                "browseId": "MPREalbum"
+                                              }
+                                            }
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "playlistPanelVideoRenderer": {
+                              "videoId": "seed",
+                              "title": {
+                                "runs": [
+                                  {
+                                    "text": "Duplicate seed"
+                                  }
+                                ]
+                              },
+                              "lengthText": {
+                                "simpleText": "3:45"
+                              },
+                              "longBylineText": {
+                                "runs": [
+                                  {
+                                    "text": "Artist",
+                                    "navigationEndpoint": {
+                                      "browseEndpoint": {
+                                        "browseId": "UCartist"
+                                      }
+                                    }
+                                  },
+                                  {
+                                    "text": " \u2022 "
+                                  },
+                                  {
+                                    "text": "Album",
+                                    "navigationEndpoint": {
+                                      "browseEndpoint": {
+                                        "browseId": "MPREalbum"
+                                      }
+                                    }
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          {
+                            "playlistPanelVideoRenderer": {
+                              "videoId": "blocked",
+                              "title": {
+                                "runs": [
+                                  {
+                                    "text": "Unavailable"
+                                  }
+                                ]
+                              },
+                              "lengthText": {
+                                "simpleText": "3:45"
+                              },
+                              "longBylineText": {
+                                "runs": [
+                                  {
+                                    "text": "Artist",
+                                    "navigationEndpoint": {
+                                      "browseEndpoint": {
+                                        "browseId": "UCartist"
+                                      }
+                                    }
+                                  },
+                                  {
+                                    "text": " \u2022 "
+                                  },
+                                  {
+                                    "text": "Album",
+                                    "navigationEndpoint": {
+                                      "browseEndpoint": {
+                                        "browseId": "MPREalbum"
+                                      }
+                                    }
+                                  }
+                                ]
+                              },
+                              "unplayableText": {
+                                "simpleText": "Unavailable"
+                              }
+                            }
+                          },
+                          {
+                            "playlistPanelVideoRenderer": {
+                              "title": {
+                                "simpleText": "Missing ID"
+                              }
+                            }
+                          },
+                          {
+                            "automixPreviewVideoRenderer": {
+                              "videoId": "not-a-track"
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
