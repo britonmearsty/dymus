@@ -93,6 +93,7 @@ async fn main() -> Result<()> {
             }
             doctor().await?;
             let mut app = app::App::new().await?;
+            app.start();
             let mut terminal = ratatui::init();
             app.image_picker = ratatui_image::picker::Picker::from_query_stdio()
                 .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());

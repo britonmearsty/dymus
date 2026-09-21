@@ -162,6 +162,7 @@ pub struct App {
     pub help: bool,
     pub help_scroll: usize,
     pub settings_view: bool,
+    pub settings_selected: usize,
     pub config: Config,
     pub menu: bool,
     pub menu_state: TableState,
@@ -231,6 +232,7 @@ impl App {
             help: false,
             help_scroll: 0,
             settings_view: false,
+            settings_selected: 0,
             config,
             menu: false,
             menu_state: TableState::default(),
@@ -253,6 +255,68 @@ impl App {
             cover_task: None,
             lyrics_task: None,
         })
+    }
+
+    pub fn start(&mut self) {
+        self.editing = self.config.start_view == "search";
+        match self.config.start_view.as_str() {
+            "home" => {
+                #[cfg(test)]
+                {
+                    self.home_focused = true;
+                }
+                #[cfg(not(test))]
+                self.load_discovery(false);
+            }
+            "explore" => {
+                #[cfg(test)]
+                {
+                    self.explore_focused = true;
+                }
+                #[cfg(not(test))]
+                self.load_discovery(true);
+            }
+            "library" | "playlists" => {
+                #[cfg(test)]
+                {
+                    self.library_focused = true;
+                }
+                #[cfg(not(test))]
+                self.load_library(LibraryKind::Playlists);
+            }
+            "albums" => {
+                #[cfg(test)]
+                {
+                    self.library_focused = true;
+                    self.library_kind = LibraryKind::Albums;
+                }
+                #[cfg(not(test))]
+                self.load_library(LibraryKind::Albums);
+            }
+            "artists" => {
+                #[cfg(test)]
+                {
+                    self.library_focused = true;
+                    self.library_kind = LibraryKind::Artists;
+                }
+                #[cfg(not(test))]
+                self.load_library(LibraryKind::Artists);
+            }
+            "podcasts" => {
+                #[cfg(test)]
+                {
+                    self.library_focused = true;
+                    self.library_kind = LibraryKind::Podcasts;
+                }
+                #[cfg(not(test))]
+                self.load_library(LibraryKind::Podcasts);
+            }
+            "queue" => {
+                self.editing = false;
+                self.queue_focused = true;
+            }
+            _ => self.editing = true,
+        }
     }
 
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
@@ -326,23 +390,37 @@ impl App {
         if self.settings_view {
             match key.code {
                 KeyCode::Esc => self.settings_view = false,
+                KeyCode::Up | KeyCode::Char('k') => self.settings_selected = 0,
+                KeyCode::Down | KeyCode::Char('j') => self.settings_selected = 1,
                 KeyCode::Left
                 | KeyCode::Char('h')
                 | KeyCode::Right
                 | KeyCode::Char('l')
                 | KeyCode::Enter => {
-                    let current = config::THEMES
-                        .iter()
-                        .position(|theme| *theme == self.config.theme)
-                        .unwrap_or(0);
                     let delta: isize = if matches!(key.code, KeyCode::Left | KeyCode::Char('h')) {
                         -1
                     } else {
                         1
                     };
-                    let next = (current as isize + delta).rem_euclid(config::THEMES.len() as isize)
-                        as usize;
-                    self.config.theme = config::THEMES[next].into();
+                    if self.settings_selected == 0 {
+                        let current = config::THEMES
+                            .iter()
+                            .position(|theme| *theme == self.config.theme)
+                            .unwrap_or(0);
+                        let next = (current as isize + delta)
+                            .rem_euclid(config::THEMES.len() as isize)
+                            as usize;
+                        self.config.theme = config::THEMES[next].into();
+                    } else {
+                        let current = config::START_VIEWS
+                            .iter()
+                            .position(|view| *view == self.config.start_view)
+                            .unwrap_or(0);
+                        let next = (current as isize + delta)
+                            .rem_euclid(config::START_VIEWS.len() as isize)
+                            as usize;
+                        self.config.start_view = config::START_VIEWS[next].into();
+                    }
                     if let Err(error) = self.config.save() {
                         self.status = format!("Could not save settings: {error:#}");
                     }
@@ -497,6 +575,7 @@ impl App {
         }
         if binding_matches(self.config.keybindings.get("settings"), key) {
             self.settings_view = true;
+            self.settings_selected = 0;
             return false;
         }
         if binding_matches(self.config.keybindings.get("search"), key) {
@@ -509,22 +588,28 @@ impl App {
             self.help_scroll = 0;
             return false;
         }
-        if binding_matches(self.config.keybindings.get("home"), key) {
+        if !self.now_playing_view && binding_matches(self.config.keybindings.get("home"), key) {
             self.load_discovery(false);
             return false;
         }
-        if binding_matches(self.config.keybindings.get("explore"), key) {
+        if !self.now_playing_view && binding_matches(self.config.keybindings.get("explore"), key) {
             self.load_discovery(true);
             return false;
         }
-        if binding_matches(self.config.keybindings.get("library"), key) {
-            self.home_focused = false;
-            self.explore_focused = false;
-            self.content_detail = false;
-            self.queue_focused = false;
-            self.library_focused = true;
-            self.load_library(LibraryKind::Playlists);
-            return false;
+        if !self.now_playing_view {
+            let destinations = [
+                ("playlists", LibraryKind::Playlists),
+                ("albums", LibraryKind::Albums),
+                ("artists", LibraryKind::Artists),
+                ("podcasts", LibraryKind::Podcasts),
+            ];
+            if let Some((_, kind)) = destinations
+                .iter()
+                .find(|(action, _)| binding_matches(self.config.keybindings.get(action), key))
+            {
+                self.load_library(*kind);
+                return false;
+            }
         }
         if binding_matches(self.config.keybindings.get("queue"), key) {
             self.queue_focused = !self.queue_focused;
@@ -637,15 +722,6 @@ impl App {
                 if (self.home_focused || self.explore_focused) && !self.content_detail =>
             {
                 self.open_discovery_item()
-            }
-            KeyCode::Char('1'..='4') if self.library_focused && !self.library_detail => {
-                let kind = match key.code {
-                    KeyCode::Char('1') => LibraryKind::Playlists,
-                    KeyCode::Char('2') => LibraryKind::Liked,
-                    KeyCode::Char('3') => LibraryKind::Albums,
-                    _ => LibraryKind::Artists,
-                };
-                self.load_library(kind);
             }
             KeyCode::Enter if self.library_focused && !self.library_detail => {
                 self.open_library_item()
@@ -999,6 +1075,8 @@ impl App {
         if let Some(task) = self.detail_task.take() {
             task.abort();
         }
+        self.queue_focused = false;
+        self.library_focused = true;
         self.home_focused = false;
         self.explore_focused = false;
         self.content_detail = false;
@@ -1010,17 +1088,6 @@ impl App {
         self.status.clear();
         self.result_marks.clear();
         let api = self.api.clone();
-        if kind == LibraryKind::Liked {
-            let item = LibraryItem {
-                title: "Liked songs".into(),
-                detail: String::new(),
-                browse_id: "FEmusic_liked_videos".into(),
-                playlist_id: String::new(),
-                track: None,
-            };
-            self.detail_task = Some(tokio::spawn(async move { api.library_tracks(&item).await }));
-            return;
-        }
         self.library_task = Some(tokio::spawn(async move { api.library(kind).await }));
     }
 
@@ -1622,6 +1689,9 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char(';'), KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         assert_eq!(app.config.theme, "catppuccin-mocha");
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.config.start_view, "explore");
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
         app.config.keybindings.search = "f".into();
@@ -1629,6 +1699,41 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
         assert!(app.editing);
         assert_eq!(app.input, "saved query");
+    }
+
+    #[tokio::test]
+    async fn startup_uses_home_by_default_or_the_configured_view() {
+        let mut app = App::new().await.unwrap();
+        app.start();
+        assert!(app.home_focused);
+        assert!(!app.editing);
+
+        let mut app = App::new().await.unwrap();
+        app.config.start_view = "queue".into();
+        app.start();
+        assert!(app.queue_focused);
+        assert!(!app.editing);
+
+        let mut app = App::new().await.unwrap();
+        app.config.start_view = "podcasts".into();
+        app.start();
+        assert!(app.library_focused);
+        assert_eq!(app.library_kind, LibraryKind::Podcasts);
+    }
+
+    #[tokio::test]
+    async fn number_shortcuts_open_four_independent_library_views() {
+        let mut app = populated_app().await;
+        for (key, kind) in [
+            ('1', LibraryKind::Playlists),
+            ('2', LibraryKind::Albums),
+            ('3', LibraryKind::Artists),
+            ('4', LibraryKind::Podcasts),
+        ] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+            assert!(app.library_focused);
+            assert_eq!(app.library_kind, kind);
+        }
     }
 
     #[tokio::test]

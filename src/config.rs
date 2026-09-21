@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct Config {
     pub theme: String,
+    pub start_view: String,
     pub colors: Colors,
     pub keybindings: KeyBindings,
 }
@@ -19,6 +20,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             theme: "tokyo-night".into(),
+            start_view: "home".into(),
             colors: Colors::default(),
             keybindings: KeyBindings::default(),
         }
@@ -53,7 +55,11 @@ pub struct KeyBindings {
     pub help: String,
     pub home: String,
     pub explore: String,
-    pub library: String,
+    #[serde(alias = "library")]
+    pub playlists: String,
+    pub albums: String,
+    pub artists: String,
+    pub podcasts: String,
     pub queue: String,
     pub now_playing: String,
     pub pause: String,
@@ -72,7 +78,10 @@ impl Default for KeyBindings {
             help: "?".into(),
             home: "h".into(),
             explore: "e".into(),
-            library: "l".into(),
+            playlists: "1".into(),
+            albums: "2".into(),
+            artists: "3".into(),
+            podcasts: "4".into(),
             queue: "Tab".into(),
             now_playing: "t".into(),
             pause: "Space".into(),
@@ -93,7 +102,10 @@ impl KeyBindings {
             "help" => &self.help,
             "home" => &self.home,
             "explore" => &self.explore,
-            "library" => &self.library,
+            "library" | "playlists" => &self.playlists,
+            "albums" => &self.albums,
+            "artists" => &self.artists,
+            "podcasts" => &self.podcasts,
             "queue" => &self.queue,
             "now_playing" => &self.now_playing,
             "pause" => &self.pause,
@@ -118,6 +130,16 @@ pub struct Palette {
 }
 
 pub const THEMES: &[&str] = &["tokyo-night", "catppuccin-mocha", "gruvbox-dark", "nord"];
+pub const START_VIEWS: &[&str] = &[
+    "home",
+    "explore",
+    "playlists",
+    "albums",
+    "artists",
+    "podcasts",
+    "search",
+    "queue",
+];
 
 impl Config {
     pub fn palette(&self) -> Palette {
@@ -150,6 +172,11 @@ impl Config {
     pub fn normalize(&mut self) {
         if !THEMES.contains(&self.theme.as_str()) {
             self.theme = "tokyo-night".into();
+        }
+        if self.start_view == "library" {
+            self.start_view = "playlists".into();
+        } else if !START_VIEWS.contains(&self.start_view.as_str()) {
+            self.start_view = "home".into();
         }
     }
 
@@ -190,7 +217,7 @@ impl Config {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Cannot create {}", parent.display()))?;
             let body = format!(
-                "# Dymus user configuration.\n# Available themes: tokyo-night, catppuccin-mocha, gruvbox-dark, nord.\n# Colors are optional six-digit hex overrides (examples below use Tokyo Night).\n# Uncomment and edit any value:\n# [colors]\n# text = \"#c0caf5\"\n# secondary = \"#a9b1d6\"\n# muted = \"#737aa2\"\n# accent = \"#7aa2f7\"\n# good = \"#9ece6a\"\n# warning = \"#e0af68\"\n# error = \"#f7768e\"\n\n{}",
+                "# Dymus user configuration.\n# Available themes: tokyo-night, catppuccin-mocha, gruvbox-dark, nord.\n# Start view: home, explore, playlists, albums, artists, podcasts, search, or queue.\n# Colors are optional six-digit hex overrides (examples below use Tokyo Night).\n# Uncomment and edit any value:\n# [colors]\n# text = \"#c0caf5\"\n# secondary = \"#a9b1d6\"\n# muted = \"#737aa2\"\n# accent = \"#7aa2f7\"\n# good = \"#9ece6a\"\n# warning = \"#e0af68\"\n# error = \"#f7768e\"\n\n{}",
                 toml::to_string_pretty(self)?
             );
             fs::write(&path, body).with_context(|| format!("Cannot write {}", path.display()))
@@ -265,6 +292,7 @@ mod tests {
         let encoded = toml::to_string_pretty(&Config::default()).unwrap();
         let decoded: Config = toml::from_str(&encoded).unwrap();
         assert_eq!(decoded.theme, "tokyo-night");
+        assert_eq!(decoded.start_view, "home");
         assert_eq!(decoded.keybindings.settings, "s");
         assert!(decoded.colors.accent.is_none());
     }

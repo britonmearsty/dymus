@@ -64,8 +64,10 @@ Dymus. Dymus does not read your browser profile or print or log cookie values.
 
 ## Controls
 
-Dymus starts with the search field focused. Type a query and press Enter. While
-editing, ordinary keys enter text; press Esc to return to browsing.
+Dymus starts on Home by default. Choose another startup view in Settings or set
+`start_view` in the TOML configuration. Press `/` to focus Search, type a query,
+and press Enter. While editing, ordinary keys enter text; press Esc to return
+to browsing.
 
 | Key | Action |
 | --- | --- |
@@ -95,10 +97,10 @@ editing, ordinary keys enter text; press Esc to return to browsing.
 | `q` | Quit from browsing mode |
 | Ctrl+C | Quit from any mode |
 | Ctrl+U | Clear the search field while editing |
-| `h` / `e` / `l` | Open Home / Explore / Library |
-| `s` | Open Settings to switch themes |
-| `1`–`4` | In Library: playlists / liked songs / albums / artists |
-| Enter / Esc | Open a Home, Explore, or Library item / return from its detail |
+| `h` / `e` | Open Home / Explore |
+| `s` | Open Settings to switch themes and choose a startup view |
+| `1`–`4` | Open Playlists / Albums / Artists / Podcasts as top-level views |
+| Enter / Esc | Open a collection item / return from its detail |
 | `t` | Open Now Playing for the current song |
 | `q` / `v` / `y` / Tab | In Now Playing: queue / visualizer / lyrics / cycle panels |
 | Shift+Tab | In Now Playing: cycle panels backward |
@@ -131,7 +133,7 @@ remain selected for `r` to retry or `n` to skip. Exiting stops playback.
 
 The default theme uses [Tokyo Night](https://github.com/folke/tokyonight.nvim)
 foreground colors and the terminal's own background, preserving transparency.
-The borderless layout shows one view at a time: songs or queue, switched with
+The borderless layout shows one view at a time: Search or queue, switched with
 Tab. A pointer and blue text indicate the selected song. Playback information
 appears only when a track is active; shortcuts are available under `?`.
 No special font or terminal image support is needed. Esc dismisses an error
@@ -141,18 +143,22 @@ while browsing.
 
 Phase 2 starts with editable appearance and core shortcuts. On first launch,
 Dymus creates `$XDG_CONFIG_HOME/dymus/config.toml` (normally
-`~/.config/dymus/config.toml`). Press `s` to open Settings and use Left/Right to
-switch the live theme; the selection is saved immediately. Built-in themes are
-Tokyo Night, Catppuccin Mocha, Gruvbox Dark, and Nord. The app keeps the
-terminal's default background for transparency.
+`~/.config/dymus/config.toml`). Press `s` to open Settings. Up/Down selects the
+theme or startup view; Left/Right changes it, and the selection is saved
+immediately. The default startup view is Home. Choose Home, Explore, Playlists,
+Albums, Artists, Podcasts, Search, or Queue. Built-in themes are Tokyo Night,
+Catppuccin Mocha, Gruvbox Dark, and Nord. The app keeps the terminal's default
+background for transparency.
 
 The TOML file also accepts optional six-digit hex color overrides and custom
-keys for settings, search, help, Home, Explore, Library, queue, Now Playing,
-pause, next, retry, volume, and quit. Key values accept a character or names
-such as `Tab`, `Space`, `Enter`, `Esc`, `Left`, and `Ctrl+U`. For example:
+keys for settings, search, help, Home, Explore, Playlists, Albums, Artists,
+Podcasts, queue, Now Playing, pause, next, retry, volume, and quit. Key values
+accept a character or names such as `Tab`, `Space`, `Enter`, `Esc`, `Left`, and
+`Ctrl+U`. For example:
 
 ```toml
 theme = "nord"
+start_view = "home"
 
 [colors]
 accent = "#88c0d0"
@@ -161,6 +167,10 @@ text = "#eceff4"
 [keybindings]
 settings = ";"
 search = "/"
+playlists = "1"
+albums = "2"
+artists = "3"
+podcasts = "4"
 next_track = "n"
 ```
 
@@ -170,8 +180,8 @@ file's `[colors]` example. Restart Dymus after editing keybindings or colors.
 ## Phase 1 features and boundaries
 
 - Search and open public YouTube Music results; search currently loads one page.
-- Home, Explore, and authenticated Library views for playlists, liked songs,
-  albums, and artists.
+- Home, Explore, Search, Queue, and four separate authenticated collection views:
+  Playlists, Albums, Artists, and Podcasts.
 - Background stream resolution, queue editing and bulk actions, radio, and
   automatic track advancement.
 - Playback progress, pause, seeking, volume, cover art, and a Now Playing view.

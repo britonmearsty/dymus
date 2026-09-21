@@ -16,9 +16,9 @@ pub struct InnerTube {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LibraryKind {
     Playlists,
-    Liked,
     Albums,
     Artists,
+    Podcasts,
 }
 
 #[derive(Clone, Debug)]
@@ -106,9 +106,9 @@ impl InnerTube {
         );
         let browse_id = match kind {
             LibraryKind::Playlists => "FEmusic_liked_playlists",
-            LibraryKind::Liked => "FEmusic_liked_videos",
             LibraryKind::Albums => "FEmusic_liked_albums",
             LibraryKind::Artists => "FEmusic_library_corpus_track_artists",
+            LibraryKind::Podcasts => "FEmusic_library_non_music_audio_list",
         };
         let response = self
             .request("browse", json!({"browseId": browse_id}))
@@ -116,6 +116,9 @@ impl InnerTube {
         let mut items = Vec::new();
         let mut seen = HashSet::new();
         collect_library_items(&response, &mut items, &mut seen);
+        if kind == LibraryKind::Podcasts {
+            items.retain(|item| !item.title.eq_ignore_ascii_case("add podcast"));
+        }
         Ok(items)
     }
 
@@ -511,6 +514,25 @@ mod tests {
         assert_eq!(items[1].track.as_ref().unwrap().id, "song-id");
         assert_eq!(items[1].detail, "Artist");
     }
+
+    #[test]
+    fn parses_podcast_library_items_as_browsable_shows() {
+        let response = json!({"contents":{"gridRenderer":{"items":[
+            {"musicTwoRowItemRenderer":{
+                "title":{"runs":[{"text":"Show name"}]},
+                "subtitle":{"runs":[{"text":"Podcast · Publisher"}]},
+                "navigationEndpoint":{"browseEndpoint":{"browseId":"MPSPpodcast-show"}}
+            }}
+        ]}}});
+        let mut items = Vec::new();
+        collect_library_items(&response, &mut items, &mut HashSet::new());
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Show name");
+        assert_eq!(items[0].detail, "Podcast · Publisher");
+        assert_eq!(items[0].browse_id, "MPSPpodcast-show");
+        assert!(items[0].track.is_none());
+    }
+
     #[test]
     fn radio_uses_primary_tracks_and_skips_duplicates_and_unavailable_items() {
         let fixture = serde_json::from_str(include_str!("../tests/fixtures/radio.json")).unwrap();

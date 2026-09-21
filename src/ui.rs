@@ -57,15 +57,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     let inner = area.inner(ratatui::layout::Margin::new(2, 1));
     if app.help {
-        help(frame, app, inner);
+        let (content, footer_area) = content_with_footer(inner);
+        help(frame, app, content);
+        footer(frame, app, footer_area);
         return;
     }
     if app.settings_view {
-        settings(frame, app, inner);
+        let (content, footer_area) = content_with_footer(inner);
+        settings(frame, app, content);
+        footer(frame, app, footer_area);
         return;
     }
     if app.menu {
-        actions(frame, app, inner);
+        let (content, footer_area) = content_with_footer(inner);
+        actions(frame, app, content);
+        footer(frame, app, footer_area);
         return;
     }
     if app.now_playing_view {
@@ -77,7 +83,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         (!app.queue_focused && !app.library_focused && !app.home_focused && !app.explore_focused)
             || app.editing;
     let rows = Layout::vertical([
-        Constraint::Length(1), // Navigation: the active view and how to find help.
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(u16::from(show_search)),
         Constraint::Length(u16::from(show_search)),
@@ -85,6 +91,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Length(if app.status.is_empty() { 0 } else { 2 }),
         Constraint::Length(u16::from(playing)), // Whitespace separates transport.
         Constraint::Length(if playing { 2 } else { 0 }),
+        Constraint::Length(1), // Keep content and footer visually separated.
+        Constraint::Length(1), // Fixed keyboard-hint footer.
     ])
     .split(inner);
     navigation(frame, app, rows[0]);
@@ -155,6 +163,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if playing {
         now_playing(frame, app, rows[7]);
     }
+    footer(frame, app, rows[9]);
+}
+
+fn content_with_footer(area: Rect) -> (Rect, Rect) {
+    let rows = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    (rows[0], rows[2])
 }
 
 fn settings(frame: &mut Frame, app: &App, area: Rect) {
@@ -172,11 +191,6 @@ fn settings(frame: &mut Frame, app: &App, area: Rect) {
             .style(Style::default().fg(text_color())),
         rows[0],
     );
-    frame.render_widget(
-        Paragraph::new("←/→ or Enter change theme · Esc close")
-            .style(Style::default().fg(muted_color())),
-        rows[1],
-    );
     let theme_line = crate::config::THEMES
         .iter()
         .map(|theme| {
@@ -191,12 +205,41 @@ fn settings(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                "theme  ",
+                format!(
+                    "{} theme  ",
+                    if app.settings_selected == 0 {
+                        "›"
+                    } else {
+                        " "
+                    }
+                ),
                 Style::default()
                     .fg(accent_color())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(theme_line, Style::default().fg(text_color())),
+        ])),
+        rows[1],
+    );
+    let start_view_line = format!("● {}", app.config.start_view);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(
+                    "{} start view  ",
+                    if app.settings_selected == 1 {
+                        "›"
+                    } else {
+                        " "
+                    }
+                ),
+                Style::default().fg(if app.settings_selected == 1 {
+                    accent_color()
+                } else {
+                    muted_color()
+                }),
+            ),
+            Span::styled(start_view_line, Style::default().fg(text_color())),
         ])),
         rows[2],
     );
@@ -209,7 +252,10 @@ fn settings(frame: &mut Frame, app: &App, area: Rect) {
         ("search", "search"),
         ("home", "home"),
         ("explore", "explore"),
-        ("library", "library"),
+        ("playlists", "playlists"),
+        ("albums", "albums"),
+        ("artists", "artists"),
+        ("podcasts", "podcasts"),
         ("queue", "queue / switch view"),
         ("now_playing", "now playing"),
         ("pause", "pause"),
@@ -248,76 +294,234 @@ fn settings(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn navigation(frame: &mut Frame, app: &App, area: Rect) {
-    let columns = Layout::horizontal([Constraint::Min(1), Constraint::Length(22)]).split(area);
     let active = Style::default().fg(accent_color());
     let inactive = Style::default().fg(muted_color());
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "dymus",
+    let search_active =
+        !app.home_focused && !app.explore_focused && !app.library_focused && !app.queue_focused;
+    let labels: [&str; 9] = if area.width >= 84 {
+        [
+            "dymus",
+            "home",
+            "explore",
+            "playlists",
+            "albums",
+            "artists",
+            "podcasts",
+            "search",
+            "queue",
+        ]
+    } else if area.width >= 79 {
+        [
+            "dymus", "home", "explore", "lists", "albums", "artists", "pods", "search", "queue",
+        ]
+    } else if area.width >= 57 {
+        [
+            "dymus", "home", "exp", "lists", "alb", "art", "pod", "search", "queue",
+        ]
+    } else {
+        ["dymus", "H", "E", "P", "A", "R", "D", "S", "Q"]
+    };
+    let keys = [
+        "",
+        app.config.keybindings.home.as_str(),
+        app.config.keybindings.explore.as_str(),
+        app.config.keybindings.playlists.as_str(),
+        app.config.keybindings.albums.as_str(),
+        app.config.keybindings.artists.as_str(),
+        app.config.keybindings.podcasts.as_str(),
+        app.config.keybindings.search.as_str(),
+        app.config.keybindings.queue.as_str(),
+    ];
+    let selected = [
+        false,
+        app.home_focused,
+        app.explore_focused,
+        app.library_focused && app.library_kind == crate::innertube::LibraryKind::Playlists,
+        app.library_focused && app.library_kind == crate::innertube::LibraryKind::Albums,
+        app.library_focused && app.library_kind == crate::innertube::LibraryKind::Artists,
+        app.library_focused && app.library_kind == crate::innertube::LibraryKind::Podcasts,
+        search_active,
+        app.queue_focused,
+    ];
+    let mut spans = Vec::with_capacity(labels.len() * 4);
+    for (index, ((label, key), is_selected)) in labels.iter().zip(keys).zip(selected).enumerate() {
+        if index == 3 || index == 7 {
+            if area.width >= 44 {
+                spans.push(Span::styled(" · ", Style::default().fg(muted_color())));
+            } else {
+                spans.push(Span::raw(" "));
+            }
+        } else if index > 0 {
+            spans.push(Span::raw(" "));
+        }
+        if index == 0 {
+            spans.push(Span::styled(
+                *label,
                 Style::default()
                     .fg(text_color())
                     .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("   "),
-            Span::styled("home", if app.home_focused { active } else { inactive }),
-            Span::raw("   "),
-            Span::styled(
-                "explore",
-                if app.explore_focused {
-                    active
-                } else {
-                    inactive
-                },
-            ),
-            Span::raw("   "),
-            Span::styled(
-                "library",
-                if app.library_focused {
-                    active
-                } else {
-                    inactive
-                },
-            ),
-            Span::raw("   "),
-            Span::styled(
-                "songs",
-                if app.queue_focused
-                    || app.library_focused
-                    || app.home_focused
-                    || app.explore_focused
+            ));
+        } else {
+            spans.push(Span::styled(
+                key,
+                Style::default()
+                    .fg(accent_color())
+                    .add_modifier(Modifier::BOLD),
+            ));
+            if area.width >= 38 {
+                spans.push(Span::raw(" "));
+            }
+            spans.push(Span::styled(
+                *label,
+                if is_selected { active } else { inactive },
+            ));
+        }
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn footer(frame: &mut Frame, app: &App, area: Rect) {
+    let keys = &app.config.keybindings;
+    let hints: Vec<(&str, &str)> = if app.help {
+        vec![
+            ("j/k", "scroll"),
+            ("Esc", "close"),
+            (keys.quit.as_str(), "quit"),
+        ]
+    } else if app.settings_view {
+        vec![
+            ("↑/↓", "select"),
+            ("←/→", "change"),
+            ("Enter", "apply"),
+            ("Esc", "close"),
+        ]
+    } else if app.menu {
+        vec![("j/k", "choose"), ("Enter", "run"), ("Esc", "close")]
+    } else if app.now_playing_view {
+        let mut hints = match app.now_panel {
+            crate::app::NowPanel::Queue => {
+                vec![
+                    ("Enter", "play"),
+                    (".", "actions"),
+                    ("d", "remove"),
+                    ("J/K", "reorder"),
+                ]
+            }
+            crate::app::NowPanel::Visualizer => vec![("m", "style"), ("[/]", "density")],
+            crate::app::NowPanel::Lyrics => {
+                let mut hints = Vec::new();
+                if app
+                    .lyrics
+                    .as_ref()
+                    .is_some_and(|lyrics| lyrics.has_synced() && lyrics.plain.is_some())
                 {
-                    inactive
-                } else {
-                    active
-                },
-            ),
-            Span::raw("   "),
-            Span::styled(
-                format!("queue {}", app.queue.upcoming.len()),
-                if app.queue_focused { active } else { inactive },
-            ),
-        ])),
-        columns[0],
-    );
-    let hint = if app.queue.current.is_some() {
-        format!(
-            "{} now playing · {} settings · ?",
-            app.config.keybindings.now_playing, app.config.keybindings.settings
-        )
+                    hints.push(("p", "lyrics format"));
+                }
+                if app.lyrics_plain {
+                    hints.push(("j/k", "scroll"));
+                }
+                hints
+            }
+        };
+        hints.extend([
+            (keys.pause.as_str(), "pause"),
+            (keys.next_track.as_str(), "next"),
+            ("←/→", "seek"),
+            ("−/+", "volume"),
+            ("Tab", "switch panel"),
+            ("Esc", "back"),
+        ]);
+        if app.playback == Playback::Failed {
+            hints.push((keys.retry_track.as_str(), "retry"));
+        }
+        hints
+    } else if app.queue_focused {
+        vec![
+            ("j/k", "move"),
+            ("Enter", "play"),
+            ("d", "remove"),
+            ("J/K", "reorder"),
+            (".", "actions"),
+            (keys.now_playing.as_str(), "now playing"),
+        ]
+    } else if app.library_focused {
+        let mut hints = if app.library_detail {
+            vec![
+                ("j/k", "move"),
+                ("Enter", "play"),
+                ("Esc", "back"),
+                ("x", "mark"),
+                (".", "actions"),
+            ]
+        } else {
+            vec![("j/k", "move"), ("Enter", "open"), ("1–4", "collections")]
+        };
+        hints.extend([
+            (keys.search.as_str(), "search"),
+            (keys.queue.as_str(), "queue"),
+        ]);
+        hints
+    } else if app.home_focused || app.explore_focused {
+        let mut hints = if app.content_detail {
+            vec![
+                ("j/k", "move"),
+                ("Enter", "play"),
+                ("Esc", "back"),
+                ("R", "radio"),
+                ("x", "mark"),
+                (".", "actions"),
+            ]
+        } else {
+            vec![
+                ("j/k", "move"),
+                ("Enter", "open"),
+                (keys.home.as_str(), "home"),
+                (keys.explore.as_str(), "explore"),
+            ]
+        };
+        hints.extend([
+            ("1–4", "collections"),
+            (keys.search.as_str(), "search"),
+            (keys.queue.as_str(), "queue"),
+        ]);
+        hints
     } else {
-        format!("{} settings · ?", app.config.keybindings.settings)
+        vec![
+            ("Enter", if app.editing { "search" } else { "play" }),
+            ("j/k", "move"),
+            ("/", "edit search"),
+            ("x", "mark"),
+            ("a", "queue"),
+            ("R", "radio"),
+            (".", "actions"),
+        ]
     };
-    frame.render_widget(
-        Paragraph::new(hint)
-            .alignment(Alignment::Right)
-            .style(inactive),
-        columns[1],
-    );
+    let mut spans = Vec::with_capacity(hints.len() * 3);
+    let mut used = 0usize;
+    for (key, label) in hints {
+        let separator = if spans.is_empty() { 0 } else { 2 };
+        let hint_width = Line::from(format!("{key} {label}")).width();
+        if used + separator + hint_width > area.width as usize {
+            break;
+        }
+        if separator > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(key, Style::default().fg(accent_color())));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(label, Style::default().fg(muted_color())));
+        used += separator + hint_width;
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
-    let layout = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
+    let layout = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(area);
     let panes = Layout::horizontal([
         Constraint::Percentage(44),
         Constraint::Length(2),
@@ -515,27 +719,7 @@ fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
         crate::app::NowPanel::Visualizer => render_visualizer(frame, app, right[2]),
         crate::app::NowPanel::Lyrics => render_lyrics(frame, app, right[2]),
     }
-    let mut controls = vec![
-        Span::styled("space", Style::default().fg(accent_color())),
-        Span::styled(" pause   ", Style::default().fg(muted_color())),
-        Span::styled("n", Style::default().fg(accent_color())),
-        Span::styled(" next   ", Style::default().fg(muted_color())),
-        Span::styled("←/→", Style::default().fg(accent_color())),
-        Span::styled(" seek   ", Style::default().fg(muted_color())),
-        Span::styled("−/+", Style::default().fg(accent_color())),
-        Span::styled(" volume   ", Style::default().fg(muted_color())),
-        Span::styled("tab", Style::default().fg(accent_color())),
-        Span::styled(" switch panel   ", Style::default().fg(muted_color())),
-        Span::styled("esc", Style::default().fg(accent_color())),
-        Span::styled(" back", Style::default().fg(muted_color())),
-    ];
-    if app.playback == Playback::Failed {
-        controls.extend([
-            Span::styled("   r", Style::default().fg(accent_color())),
-            Span::styled(" retry", Style::default().fg(muted_color())),
-        ]);
-    }
-    frame.render_widget(Paragraph::new(Line::from(controls)), layout[1]);
+    footer(frame, app, layout[2]);
 }
 
 fn render_visualizer(frame: &mut Frame, app: &App, area: Rect) {
@@ -963,38 +1147,16 @@ fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn library(frame: &mut Frame, app: &mut App, area: Rect) {
-    let (label, selected) = match app.library_kind {
-        crate::innertube::LibraryKind::Playlists => ("playlists", 0),
-        crate::innertube::LibraryKind::Liked => ("liked songs", 1),
-        crate::innertube::LibraryKind::Albums => ("albums", 2),
-        crate::innertube::LibraryKind::Artists => ("artists", 3),
+    let label = match app.library_kind {
+        crate::innertube::LibraryKind::Playlists => "playlists",
+        crate::innertube::LibraryKind::Albums => "albums",
+        crate::innertube::LibraryKind::Artists => "artists",
+        crate::innertube::LibraryKind::Podcasts => "podcasts",
     };
-    let tabs = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
-    let names = ["1 playlists", "2 liked", "3 albums", "4 artists"];
-    frame.render_widget(
-        Paragraph::new(
-            names
-                .iter()
-                .enumerate()
-                .map(|(i, n)| {
-                    Span::styled(
-                        format!("{}{}  ", n, if i == selected { " ·" } else { "" }),
-                        if i == selected {
-                            Style::default().fg(accent_color())
-                        } else {
-                            Style::default().fg(muted_color())
-                        },
-                    )
-                })
-                .collect::<Line>(),
-        )
-        .style(Style::default()),
-        tabs[0],
-    );
     if app.library_loading {
         frame.render_widget(
             Paragraph::new("Loading…").style(Style::default().fg(muted_color())),
-            tabs[1],
+            area,
         );
         return;
     }
@@ -1002,7 +1164,7 @@ fn library(frame: &mut Frame, app: &mut App, area: Rect) {
         if app.results.is_empty() {
             frame.render_widget(
                 Paragraph::new("No tracks").style(Style::default().fg(muted_color())),
-                tabs[1],
+                area,
             );
         } else {
             tracks(
@@ -1011,7 +1173,7 @@ fn library(frame: &mut Frame, app: &mut App, area: Rect) {
                 &mut app.results_state,
                 &app.result_marks,
                 true,
-                tabs[1],
+                area,
             );
         }
         return;
@@ -1024,7 +1186,7 @@ fn library(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         frame.render_widget(
             Paragraph::new(message).style(Style::default().fg(muted_color())),
-            tabs[1],
+            area,
         );
         return;
     }
@@ -1044,7 +1206,7 @@ fn library(frame: &mut Frame, app: &mut App, area: Rect) {
             .fg(accent_color())
             .add_modifier(Modifier::BOLD),
     );
-    frame.render_stateful_widget(table, tabs[1], &mut app.library_state);
+    frame.render_stateful_widget(table, area, &mut app.library_state);
 }
 
 fn search(frame: &mut Frame, app: &App, area: Rect) {
@@ -1197,7 +1359,6 @@ fn actions(frame: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Min(1),
     ])
     .split(area);
-    let header = Layout::horizontal([Constraint::Min(1), Constraint::Length(9)]).split(rows[0]);
     let title = if app.marks().is_empty() {
         "actions".to_owned()
     } else {
@@ -1205,13 +1366,7 @@ fn actions(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(title).style(Style::default().fg(text_color())),
-        header[0],
-    );
-    frame.render_widget(
-        Paragraph::new("esc close")
-            .alignment(Alignment::Right)
-            .style(Style::default().fg(muted_color())),
-        header[1],
+        rows[0],
     );
     let items = app.menu_items();
     let table = Table::new(
@@ -1246,7 +1401,10 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("d · J/K", "Remove / move selection"),
     ("C", "Clear upcoming queue"),
     ("Space · n/r", "Pause · next / retry"),
-    ("h/e/l · 1–4", "Home / Explore / Library sections"),
+    (
+        "h/e · 1–4",
+        "Home / Explore / Playlists / Albums / Artists / Podcasts",
+    ),
     ("Enter · Esc", "Open an item / return from its detail"),
     ("t · q/v/y · Tab", "Now-playing view · switch right pane"),
     ("Shift+Tab", "Previous Now-playing panel"),
@@ -1264,7 +1422,6 @@ fn help(frame: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Min(1),
     ])
     .split(area);
-    let header = Layout::horizontal([Constraint::Min(1), Constraint::Length(9)]).split(rows[0]);
     let title = if (rows[2].height as usize) < SHORTCUTS.len() {
         "shortcuts · j/k scroll"
     } else {
@@ -1272,13 +1429,7 @@ fn help(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(title).style(Style::default().fg(text_color())),
-        header[0],
-    );
-    frame.render_widget(
-        Paragraph::new("esc close")
-            .alignment(Alignment::Right)
-            .style(Style::default().fg(muted_color())),
-        header[1],
+        rows[0],
     );
     app.help_scroll = app
         .help_scroll
@@ -1321,6 +1472,39 @@ mod tests {
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
             app.settings_view = false;
         }
+    }
+
+    #[tokio::test]
+    async fn footer_hints_follow_the_active_screen() {
+        let mut app = App::new().await.unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+
+        app.help = true;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("scroll"));
+        assert!(text.contains("close"));
+
+        app.help = false;
+        app.settings_view = true;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("select"));
+        assert!(text.contains("change"));
+
+        app.settings_view = false;
+        app.menu = true;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("choose"));
+        assert!(text.contains("run"));
+
+        app.menu = false;
+        app.queue_focused = true;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("remove"));
+        assert!(text.contains("reorder"));
     }
 
     #[tokio::test]
