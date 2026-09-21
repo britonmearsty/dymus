@@ -142,13 +142,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 rows[4],
             );
         }
+    } else if app.search_filter != crate::innertube::SearchFilter::Songs
+        && !app.search_items.is_empty()
+    {
+        search_collections(frame, app, rows[4]);
     } else if app.results.is_empty() {
         let message = if app.searching {
             "Searching…"
         } else if app.query.is_empty() || !app.status.is_empty() {
             ""
         } else {
-            "No songs found"
+            "No results found"
         };
         frame.render_widget(
             Paragraph::new(message).style(Style::default().fg(muted_color())),
@@ -176,6 +180,26 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         now_playing(frame, app, rows[7]);
     }
     footer(frame, app, rows[9]);
+}
+
+fn search_collections(frame: &mut Frame, app: &mut App, area: Rect) {
+    let table = Table::new(
+        app.search_items.iter().map(|item| {
+            Row::new(vec![
+                Cell::from(item.title.as_str()),
+                Cell::from(item.detail.as_str()).style(Style::default().fg(secondary_color())),
+            ])
+        }),
+        [Constraint::Fill(2), Constraint::Fill(1)],
+    )
+    .column_spacing(2)
+    .highlight_symbol("› ")
+    .row_highlight_style(
+        Style::default()
+            .fg(accent_color())
+            .add_modifier(Modifier::BOLD),
+    );
+    frame.render_stateful_widget(table, area, &mut app.results_state);
 }
 
 fn content_with_footer(area: Rect) -> (Rect, Rect) {
@@ -481,6 +505,12 @@ fn footer(frame: &mut Frame, app: &App, area: Rect) {
             (keys.search.as_str(), "search"),
             (keys.queue.as_str(), "queue"),
         ]);
+        if !app.library_detail && app.library_continuation.is_some() {
+            hints.push(("L", "load more"));
+        }
+        if app.library_detail && app.library_detail_continuation.is_some() {
+            hints.push(("L", "load more"));
+        }
         hints
     } else if app.home_focused || app.explore_focused {
         let mut hints = if app.content_detail {
@@ -520,15 +550,33 @@ fn footer(frame: &mut Frame, app: &App, area: Rect) {
         ]);
         hints
     } else {
-        vec![
-            ("Enter", if app.editing { "search" } else { "play" }),
+        let mut hints = vec![
+            (
+                "Enter",
+                if app.editing {
+                    "search"
+                } else if app.search_filter == crate::innertube::SearchFilter::Songs {
+                    "play"
+                } else {
+                    "open"
+                },
+            ),
             ("j/k", "move"),
             ("/", "edit search"),
-            ("x", "mark"),
-            ("a", "queue"),
-            ("R", "radio"),
-            (".", "actions"),
-        ]
+            ("f", "filter"),
+        ];
+        if app.search_filter == crate::innertube::SearchFilter::Songs {
+            hints.extend([
+                ("x", "mark"),
+                ("a", "queue"),
+                ("R", "radio"),
+                (".", "actions"),
+            ]);
+        }
+        if app.search_continuation.is_some() {
+            hints.push(("L", "load more"));
+        }
+        hints
     };
     let mut spans = Vec::with_capacity(hints.len() * 3);
     let mut used = 0usize;
@@ -1384,7 +1432,7 @@ fn search(frame: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled(
                 if placeholder {
-                    "Search songs or artists"
+                    "Search songs, artists, albums, or playlists"
                 } else {
                     visible
                 },
@@ -1397,6 +1445,23 @@ fn search(frame: &mut Frame, app: &App, area: Rect) {
         ])),
         area,
     );
+    let filter = format!(" [{}]", app.search_filter.label());
+    let filter_width = Line::from(filter.as_str()).width() as u16;
+    if area.width > filter_width {
+        frame.render_widget(
+            Paragraph::new(filter).style(
+                Style::default()
+                    .fg(muted_color())
+                    .add_modifier(Modifier::ITALIC),
+            ),
+            Rect {
+                x: area.x + area.width - filter_width,
+                y: area.y,
+                width: filter_width,
+                height: 1,
+            },
+        );
+    }
     if app.editing {
         frame.set_cursor_position((area.x + 2 + Line::from(visible).width() as u16, area.y));
     }

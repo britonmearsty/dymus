@@ -52,8 +52,10 @@ enum AuthCommand {
 async fn main() -> Result<()> {
     match Cli::parse().command {
         Some(Command::Search { query }) => {
-            let tracks = innertube::InnerTube::configured()?.search(&query).await?;
-            println!("{}", serde_json::to_string_pretty(&tracks)?);
+            let page = innertube::InnerTube::configured()?
+                .search(&query, innertube::SearchFilter::Songs)
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&page.tracks)?);
         }
         Some(Command::Doctor) => doctor().await?,
         Some(Command::Auth {

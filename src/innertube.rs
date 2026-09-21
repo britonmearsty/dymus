@@ -22,6 +22,44 @@ pub enum LibraryKind {
     Podcasts,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SearchFilter {
+    #[default]
+    Songs,
+    Artists,
+    Albums,
+    Playlists,
+}
+
+impl SearchFilter {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Songs => Self::Artists,
+            Self::Artists => Self::Albums,
+            Self::Albums => Self::Playlists,
+            Self::Playlists => Self::Songs,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Songs => "songs",
+            Self::Artists => "artists",
+            Self::Albums => "albums",
+            Self::Playlists => "playlists",
+        }
+    }
+
+    fn params(self) -> &'static str {
+        match self {
+            Self::Songs => "EgWKAQIIAWoKEAMQBBAJEAoQBQ==",
+            Self::Artists => "EgWKAQIgAWoKEAMQBBAJEAoQBQ==",
+            Self::Albums => "EgWKAQIYAWoKEAMQBBAJEAoQBQ==",
+            Self::Playlists => "EgWKAQJAAWoKEAMQBBAJEAoQBQ==",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LibraryItem {
     #[serde(default)]
@@ -43,6 +81,25 @@ pub struct DiscoveryContinuation {
 pub struct DiscoveryPage {
     pub items: Vec<LibraryItem>,
     pub continuations: Vec<DiscoveryContinuation>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LibraryPage {
+    pub items: Vec<LibraryItem>,
+    pub continuation: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TrackPage {
+    pub tracks: Vec<Track>,
+    pub continuation: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SearchPage {
+    pub tracks: Vec<Track>,
+    pub items: Vec<LibraryItem>,
+    pub continuation: Option<String>,
 }
 
 impl InnerTube {
@@ -81,7 +138,7 @@ impl InnerTube {
             .context("YouTube Music did not return a signed-in account; the session may be expired or the account index may be wrong")
     }
 
-    pub async fn search(&self, query: &str) -> Result<Vec<Track>> {
+    pub async fn search(&self, query: &str, filter: SearchFilter) -> Result<SearchPage> {
         if query.trim().is_empty() {
             bail!("Enter a song or artist to search");
         }
@@ -90,11 +147,18 @@ impl InnerTube {
                 "search",
                 json!({
                     "query": query.trim(),
-                    "params": "EgWKAQIIAWoMEA4QChADEAQQCRAF"
+                    "params": filter.params()
                 }),
             )
             .await?;
-        parse_search(&response)
+        parse_search_page(&response, filter)
+    }
+
+    pub async fn search_more(&self, token: &str, filter: SearchFilter) -> Result<SearchPage> {
+        let response = self
+            .request("search", json!({"continuation": token}))
+            .await?;
+        parse_search_page(&response, filter)
     }
 
     pub async fn radio(&self, video_id: &str) -> Result<Vec<Track>> {
@@ -114,7 +178,7 @@ impl InnerTube {
         parse_radio(&response)
     }
 
-    pub async fn library(&self, kind: LibraryKind) -> Result<Vec<LibraryItem>> {
+    pub async fn library(&self, kind: LibraryKind) -> Result<LibraryPage> {
         anyhow::ensure!(
             self.auth.is_some(),
             "Library requires sign-in; run `dymus auth paste`"
@@ -128,13 +192,19 @@ impl InnerTube {
         let response = self
             .request("browse", json!({"browseId": browse_id}))
             .await?;
-        let mut items = Vec::new();
-        let mut seen = HashSet::new();
-        collect_library_items(&response, &mut items, &mut seen);
+        let mut page = parse_library(&response)?;
         if kind == LibraryKind::Podcasts {
-            items.retain(|item| !item.title.eq_ignore_ascii_case("add podcast"));
+            page.items
+                .retain(|item| !item.title.eq_ignore_ascii_case("add podcast"));
         }
-        Ok(items)
+        Ok(page)
+    }
+
+    pub async fn library_more(&self, token: &str) -> Result<LibraryPage> {
+        let response = self
+            .request("browse", json!({"continuation": token}))
+            .await?;
+        parse_library(&response)
     }
 
     pub async fn discover(&self, explore: bool) -> Result<DiscoveryPage> {
@@ -156,9 +226,12 @@ impl InnerTube {
         parse_discovery(&response, Some(section))
     }
 
-    pub async fn library_tracks(&self, item: &LibraryItem) -> Result<Vec<Track>> {
+    pub async fn library_tracks(&self, item: &LibraryItem) -> Result<TrackPage> {
         if let Some(track) = &item.track {
-            return Ok(vec![track.clone()]);
+            return Ok(TrackPage {
+                tracks: vec![track.clone()],
+                continuation: None,
+            });
         }
         let body = if !item.playlist_id.is_empty() {
             json!({"playlistId": item.playlist_id})
@@ -166,7 +239,14 @@ impl InnerTube {
             json!({"browseId": item.browse_id})
         };
         let response = self.request("browse", body).await?;
-        parse_search(&response)
+        parse_track_page(&response)
+    }
+
+    pub async fn library_tracks_more(&self, token: &str) -> Result<TrackPage> {
+        let response = self
+            .request("browse", json!({"continuation": token}))
+            .await?;
+        parse_track_page(&response)
     }
 
     async fn request(&self, endpoint: &str, mut body: Value) -> Result<Value> {
@@ -221,34 +301,32 @@ fn collect_library_items(value: &Value, items: &mut Vec<LibraryItem>, seen: &mut
                 "musicNavigationButtonRenderer",
             ] {
                 if let Some(item) = map.get(key) {
-                    if key == "musicResponsiveListItemRenderer" {
-                        if let Some(track) = parse_track(item)
-                            && seen.insert(track.id.clone())
-                        {
-                            items.push(LibraryItem {
-                                section: String::new(),
-                                title: track.title.clone(),
-                                detail: track.artist.clone(),
-                                browse_id: String::new(),
-                                playlist_id: String::new(),
-                                track: Some(track),
-                            });
-                        }
+                    if key == "musicResponsiveListItemRenderer"
+                        && let Some(track) = parse_track(item)
+                        && seen.insert(track.id.clone())
+                    {
+                        items.push(LibraryItem {
+                            section: String::new(),
+                            title: track.title.clone(),
+                            detail: track.artist.clone(),
+                            browse_id: String::new(),
+                            playlist_id: String::new(),
+                            track: Some(track),
+                        });
                         return;
                     }
-                    if key == "musicMultiRowListItemRenderer" {
-                        if let Some(track) = parse_multi_row_track(item)
-                            && seen.insert(track.id.clone())
-                        {
-                            items.push(LibraryItem {
-                                section: String::new(),
-                                title: track.title.clone(),
-                                detail: track.artist.clone(),
-                                browse_id: String::new(),
-                                playlist_id: String::new(),
-                                track: Some(track),
-                            });
-                        }
+                    if key == "musicMultiRowListItemRenderer"
+                        && let Some(track) = parse_multi_row_track(item)
+                        && seen.insert(track.id.clone())
+                    {
+                        items.push(LibraryItem {
+                            section: String::new(),
+                            title: track.title.clone(),
+                            detail: track.artist.clone(),
+                            browse_id: String::new(),
+                            playlist_id: String::new(),
+                            track: Some(track),
+                        });
                         return;
                     }
                     let title = item.pointer("/title/runs/0/text").and_then(Value::as_str).or_else(|| item.pointer("/title/simpleText").and_then(Value::as_str)).or_else(|| item.pointer("/buttonText/runs/0/text").and_then(Value::as_str)).or_else(|| item.pointer("/flexColumns/0/musicResponsiveListItemFlexColumnRenderer/text/runs/0/text").and_then(Value::as_str)).unwrap_or("");
@@ -257,6 +335,10 @@ fn collect_library_items(value: &Value, items: &mut Vec<LibraryItem>, seen: &mut
                         .and_then(Value::as_str)
                         .or_else(|| {
                             item.pointer("/title/runs/0/navigationEndpoint/browseEndpoint/browseId")
+                                .and_then(Value::as_str)
+                        })
+                        .or_else(|| {
+                            item.pointer("/flexColumns/0/musicResponsiveListItemFlexColumnRenderer/text/runs/0/navigationEndpoint/browseEndpoint/browseId")
                                 .and_then(Value::as_str)
                         })
                         .unwrap_or("");
@@ -271,6 +353,10 @@ fn collect_library_items(value: &Value, items: &mut Vec<LibraryItem>, seen: &mut
                         })
                         .or_else(|| {
                             item.pointer("/buttonCommand/watchPlaylistEndpoint/playlistId")
+                                .and_then(Value::as_str)
+                        })
+                        .or_else(|| {
+                            item.pointer("/flexColumns/0/musicResponsiveListItemFlexColumnRenderer/text/runs/0/navigationEndpoint/watchEndpoint/playlistId")
                                 .and_then(Value::as_str)
                         })
                         .unwrap_or("");
@@ -328,6 +414,37 @@ fn collect_library_items(value: &Value, items: &mut Vec<LibraryItem>, seen: &mut
         }
         _ => {}
     }
+}
+
+fn parse_library(response: &Value) -> Result<LibraryPage> {
+    let contents = response
+        .pointer("/contents/singleColumnBrowseResultsRenderer/tabs")
+        .and_then(Value::as_array)
+        .and_then(|tabs| {
+            tabs.iter()
+                .find_map(|tab| tab.pointer("/tabRenderer/content"))
+        })
+        .or_else(|| response.pointer("/continuationContents/musicShelfContinuation/contents"))
+        .or_else(|| response.pointer("/continuationContents/gridContinuation/items"))
+        .context("Library response has no contents; the InnerTube API may have changed")?;
+    let mut items = Vec::new();
+    collect_library_items(contents, &mut items, &mut HashSet::new());
+    let continuation = response
+        .pointer("/contents/singleColumnBrowseResultsRenderer/tabs")
+        .and_then(Value::as_array)
+        .and_then(|tabs| {
+            tabs.iter().find_map(|tab| {
+                tab.pointer("/tabRenderer/content/sectionListRenderer")
+                    .or_else(|| tab.pointer("/tabRenderer/content/musicShelfRenderer"))
+            })
+        })
+        .or_else(|| response.pointer("/continuationContents/musicShelfContinuation"))
+        .or_else(|| response.pointer("/continuationContents/gridContinuation"))
+        .and_then(continuation_token);
+    Ok(LibraryPage {
+        items,
+        continuation,
+    })
 }
 
 fn parse_discovery(response: &Value, fallback_section: Option<&str>) -> Result<DiscoveryPage> {
@@ -491,6 +608,70 @@ pub fn parse_search(response: &Value) -> Result<Vec<Track>> {
     Ok(tracks)
 }
 
+fn parse_search_page(response: &Value, filter: SearchFilter) -> Result<SearchPage> {
+    if filter == SearchFilter::Songs {
+        return Ok(SearchPage {
+            tracks: parse_search(response)?,
+            items: Vec::new(),
+            continuation: search_continuation(response),
+        });
+    }
+    if let Some(error) = response.get("error") {
+        bail!(
+            "YouTube Music: {}",
+            error["message"].as_str().unwrap_or("request failed")
+        );
+    }
+    let contents = response
+        .get("contents")
+        .or_else(|| response.pointer("/continuationContents"))
+        .context("Search response has no contents; the InnerTube API may have changed")?;
+    let mut items = Vec::new();
+    collect_library_items(contents, &mut items, &mut HashSet::new());
+    Ok(SearchPage {
+        tracks: Vec::new(),
+        items,
+        continuation: search_continuation(response),
+    })
+}
+
+fn search_continuation(response: &Value) -> Option<String> {
+    response
+        .pointer("/continuationContents/musicShelfContinuation")
+        .or_else(|| response.pointer("/continuationContents/sectionListContinuation"))
+        .or_else(|| {
+            response.pointer(
+                "/contents/tabbedSearchResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer",
+            )
+        })
+        .and_then(continuation_token)
+        .or_else(|| response.get("contents").and_then(find_continuation))
+}
+
+fn find_continuation(value: &Value) -> Option<String> {
+    if let Some(token) = continuation_token(value) {
+        return Some(token);
+    }
+    match value {
+        Value::Object(map) => map.values().find_map(find_continuation),
+        Value::Array(values) => values.iter().find_map(find_continuation),
+        _ => None,
+    }
+}
+
+fn parse_track_page(response: &Value) -> Result<TrackPage> {
+    let tracks = parse_search(response)?;
+    let continuation = response
+        .pointer("/continuationContents/musicShelfContinuation")
+        .or_else(|| response.pointer("/continuationContents/sectionListContinuation"))
+        .or_else(|| response.pointer("/contents/twoColumnBrowseResultsRenderer/secondaryContents"))
+        .and_then(continuation_token);
+    Ok(TrackPage {
+        tracks,
+        continuation,
+    })
+}
+
 // Parse only the actual watch queue, not recommendations, menus, or alternate
 // video counterparts. Preserve YouTube's order and skip unavailable entries.
 fn parse_radio(response: &Value) -> Result<Vec<Track>> {
@@ -578,6 +759,14 @@ fn collect_tracks(value: &Value, tracks: &mut Vec<Track>, seen: &mut HashSet<Str
         Value::Object(map) => {
             if let Some(item) = map.get("musicResponsiveListItemRenderer") {
                 if let Some(track) = parse_track(item)
+                    && seen.insert(track.id.clone())
+                {
+                    tracks.push(track);
+                }
+                return;
+            }
+            if let Some(item) = map.get("musicMultiRowListItemRenderer") {
+                if let Some(track) = parse_multi_row_track(item)
                     && seen.insert(track.id.clone())
                 {
                     tracks.push(track);
@@ -809,6 +998,54 @@ mod tests {
     }
 
     #[test]
+    fn parses_podcast_episode_rows_from_a_show_page() {
+        let response = json!({"contents":{"singleColumnBrowseResultsRenderer":{"tabs":[{
+            "tabRenderer":{"content":{"sectionListRenderer":{"contents":[{
+                "musicShelfRenderer":{"contents":[{
+                    "musicMultiRowListItemRenderer":{
+                        "title":{"runs":[{"text":"Episode one", "navigationEndpoint":{"watchEndpoint":{"videoId":"episode-one"}}}]},
+                        "subtitle":{"runs":[{"text":"Show name · Sep 21"}]},
+                        "playNavigationEndpoint":{"watchEndpoint":{"videoId":"episode-one"}}
+                    }
+                }]}
+            }]}}}
+        }]}}});
+        let page = parse_track_page(&response).unwrap();
+        assert_eq!(page.tracks.len(), 1);
+        assert_eq!(page.tracks[0].id, "episode-one");
+        assert_eq!(page.tracks[0].title, "Episode one");
+        assert_eq!(page.tracks[0].artist, "Show name · Sep 21");
+    }
+
+    #[test]
+    fn preserves_library_order_and_continuation() {
+        let response = json!({"contents":{"singleColumnBrowseResultsRenderer":{"tabs":[{
+            "tabRenderer":{"content":{"sectionListRenderer":{
+                "contents":[{"musicShelfRenderer":{"contents":[
+                    {"musicTwoRowItemRenderer":{
+                        "title":{"runs":[{"text":"First album"}]},
+                        "navigationEndpoint":{"browseEndpoint":{"browseId":"MPREfirst"}}
+                    }},
+                    {"musicTwoRowItemRenderer":{
+                        "title":{"runs":[{"text":"Second album"}]},
+                        "navigationEndpoint":{"browseEndpoint":{"browseId":"MPREsecond"}}
+                    }}
+                ]}}],
+                "continuations":[{"nextContinuationData":{"continuation":"next-library-page"}}]
+            }}}
+        }]}}});
+        let page = parse_library(&response).unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.title.as_str())
+                .collect::<Vec<_>>(),
+            ["First album", "Second album"]
+        );
+        assert_eq!(page.continuation.as_deref(), Some("next-library-page"));
+    }
+
+    #[test]
     fn radio_uses_primary_tracks_and_skips_duplicates_and_unavailable_items() {
         let fixture = serde_json::from_str(include_str!("../tests/fixtures/radio.json")).unwrap();
         let tracks = parse_radio(&fixture).unwrap();
@@ -829,8 +1066,14 @@ mod tests {
     #[ignore = "requires YouTube Music network access"]
     async fn live_radio_returns_related_tracks() {
         let api = InnerTube::new().unwrap();
-        let songs = api.search("Nujabes Feather").await.unwrap();
-        let seed = songs.first().expect("search should find a seed track");
+        let songs = api
+            .search("Nujabes Feather", SearchFilter::Songs)
+            .await
+            .unwrap();
+        let seed = songs
+            .tracks
+            .first()
+            .expect("search should find a seed track");
         let tracks = api.radio(&seed.id).await.unwrap();
         assert!(tracks.iter().any(|track| track.id != seed.id));
         assert_eq!(
@@ -886,6 +1129,22 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    #[ignore = "requires configured YouTube Music authentication and network access"]
+    async fn live_authenticated_collections_parse() {
+        let api = InnerTube::configured().unwrap();
+        for kind in [
+            LibraryKind::Playlists,
+            LibraryKind::Albums,
+            LibraryKind::Artists,
+            LibraryKind::Podcasts,
+        ] {
+            let page = api.library(kind).await.unwrap();
+            assert!(page.items.iter().all(|item| !item.title.trim().is_empty()));
+            eprintln!("{kind:?}: {} items", page.items.len());
+        }
+    }
+
     #[test]
     fn parses_nested_results_and_deduplicates_without_menu_tracks() {
         let fixture: Value =
@@ -904,6 +1163,45 @@ mod tests {
         );
         assert_eq!(tracks[1].id, "song-two");
         assert_eq!(tracks[1].duration, "4:02");
+    }
+
+    #[test]
+    fn parses_artist_search_results_and_their_continuation() {
+        let response = json!({"contents": {"tabbedSearchResultsRenderer": {"tabs": [{
+            "tabRenderer": {"content": {"sectionListRenderer": {
+                "contents": [{"musicShelfRenderer": {"contents": [{
+                    "musicResponsiveListItemRenderer": {
+                        "flexColumns": [
+                            {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{
+                                "text": "An artist",
+                                "navigationEndpoint": {"browseEndpoint": {"browseId": "UCartist"}}
+                            }]}}},
+                            {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Artist"}]}}}
+                        ]
+                    }
+                }]}}],
+                "continuations": [{"nextContinuationData": {"continuation": "more-artists"}}]
+            }}}
+        }]}}});
+        let page = parse_search_page(&response, SearchFilter::Artists).unwrap();
+        assert!(page.tracks.is_empty());
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].title, "An artist");
+        assert_eq!(page.items[0].browse_id, "UCartist");
+        assert_eq!(page.continuation.as_deref(), Some("more-artists"));
+    }
+
+    #[test]
+    fn search_filters_have_distinct_request_parameters() {
+        assert_ne!(SearchFilter::Songs.params(), SearchFilter::Artists.params());
+        assert_ne!(
+            SearchFilter::Artists.params(),
+            SearchFilter::Albums.params()
+        );
+        assert_ne!(
+            SearchFilter::Albums.params(),
+            SearchFilter::Playlists.params()
+        );
     }
     #[test]
     fn distinguishes_empty_results_from_api_errors() {

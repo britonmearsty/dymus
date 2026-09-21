@@ -14,7 +14,10 @@ use tokio::task::JoinHandle;
 use crate::{
     cache,
     config::{self, Config},
-    innertube::{DiscoveryContinuation, DiscoveryPage, InnerTube, LibraryItem, LibraryKind},
+    innertube::{
+        DiscoveryContinuation, DiscoveryPage, InnerTube, LibraryItem, LibraryKind, LibraryPage,
+        SearchFilter, SearchPage, TrackPage,
+    },
     model::{Queue, Track},
     player::{Event, Player},
     radio::{RadioBrowser, Station, StationFilter},
@@ -126,16 +129,22 @@ pub struct App {
     pub editing: bool,
     pub query: String,
     pub results: Vec<Track>,
+    pub search_items: Vec<LibraryItem>,
+    pub search_filter: SearchFilter,
+    pub search_continuation: Option<String>,
     pub results_state: TableState,
     pub queue: Queue,
     pub queue_state: TableState,
     pub queue_focused: bool,
     pub library_focused: bool,
     pub library_detail: bool,
+    search_detail: bool,
     pub library_kind: LibraryKind,
     pub library_items: Vec<LibraryItem>,
+    pub library_continuation: Option<String>,
     pub library_state: TableState,
     pub library_loading: bool,
+    pub library_detail_continuation: Option<String>,
     pub home_focused: bool,
     pub explore_focused: bool,
     pub radio_focused: bool,
@@ -190,10 +199,13 @@ pub struct App {
     player: Player,
     radio_api: RadioBrowser,
     generation: u64,
-    search_task: Option<JoinHandle<Result<Vec<Track>>>>,
+    search_task: Option<JoinHandle<Result<SearchPage>>>,
+    search_appending: bool,
     radio_task: Option<JoinHandle<Result<Vec<Track>>>>,
-    library_task: Option<JoinHandle<Result<Vec<LibraryItem>>>>,
-    detail_task: Option<JoinHandle<Result<Vec<Track>>>>,
+    library_task: Option<JoinHandle<Result<LibraryPage>>>,
+    library_appending: bool,
+    detail_task: Option<JoinHandle<Result<TrackPage>>>,
+    detail_appending: bool,
     discovery_task: Option<JoinHandle<Result<DiscoveryPage>>>,
     discovery_appending: bool,
     discovery_append_section: Option<String>,
@@ -210,16 +222,22 @@ impl App {
             editing: true,
             query: String::new(),
             results: Vec::new(),
+            search_items: Vec::new(),
+            search_filter: SearchFilter::Songs,
+            search_continuation: None,
             results_state: TableState::default(),
             queue: Queue::default(),
             queue_state: TableState::default(),
             queue_focused: false,
             library_focused: false,
             library_detail: false,
+            search_detail: false,
             library_kind: LibraryKind::Playlists,
             library_items: Vec::new(),
+            library_continuation: None,
             library_state: TableState::default(),
             library_loading: false,
+            library_detail_continuation: None,
             home_focused: false,
             explore_focused: false,
             radio_focused: false,
@@ -275,9 +293,12 @@ impl App {
             radio_api: RadioBrowser::new()?,
             generation: 0,
             search_task: None,
+            search_appending: false,
             radio_task: None,
             library_task: None,
+            library_appending: false,
             detail_task: None,
+            detail_appending: false,
             discovery_task: None,
             discovery_appending: false,
             discovery_append_section: None,
@@ -372,14 +393,45 @@ impl App {
                 let result = self.search_task.take().unwrap().await;
                 self.searching = false;
                 match result {
-                    Ok(Ok(tracks)) => {
+                    Ok(Ok(page)) => {
                         self.status.clear();
-                        self.results = tracks;
-                        self.results_state.select(if self.results.is_empty() {
-                            None
+                        if self.search_appending {
+                            if self.search_filter == SearchFilter::Songs {
+                                let mut ids = self
+                                    .results
+                                    .iter()
+                                    .map(|track| track.id.clone())
+                                    .collect::<BTreeSet<_>>();
+                                self.results.extend(
+                                    page.tracks
+                                        .into_iter()
+                                        .filter(|track| ids.insert(track.id.clone())),
+                                );
+                            } else {
+                                let mut ids = self
+                                    .search_items
+                                    .iter()
+                                    .map(library_item_key)
+                                    .collect::<BTreeSet<_>>();
+                                self.search_items.extend(
+                                    page.items
+                                        .into_iter()
+                                        .filter(|item| ids.insert(library_item_key(item))),
+                                );
+                            }
                         } else {
-                            Some(0)
-                        });
+                            self.results = page.tracks;
+                            self.search_items = page.items;
+                        }
+                        self.search_continuation = page.continuation;
+                        self.search_appending = false;
+                        let count = if self.search_filter == SearchFilter::Songs {
+                            self.results.len()
+                        } else {
+                            self.search_items.len()
+                        };
+                        self.results_state
+                            .select(if count == 0 { None } else { Some(0) });
                     }
                     Ok(Err(error)) => self.status = format!("Search failed: {error:#}"),
                     Err(error) => self.status = format!("Search task failed: {error}"),
@@ -753,6 +805,11 @@ impl App {
         if ((!self.library_focused || self.library_detail)
             && (!self.home_focused && !self.explore_focused || self.content_detail))
             && (!self.now_playing_view || self.now_panel == NowPanel::Queue)
+            && (self.queue_context()
+                || self.library_focused
+                || self.home_focused
+                || self.explore_focused
+                || self.search_filter == SearchFilter::Songs)
             && let Some(action) = self.action_for_key(key.code)
         {
             self.execute(action);
@@ -765,6 +822,10 @@ impl App {
             }
             KeyCode::Esc => {
                 if self.library_focused && self.library_detail {
+                    if self.search_detail {
+                        self.library_focused = false;
+                        self.search_detail = false;
+                    }
                     self.library_detail = false;
                     self.results.clear();
                     self.status.clear();
@@ -823,6 +884,43 @@ impl App {
                 if (self.home_focused || self.explore_focused) && !self.content_detail =>
             {
                 self.load_more_discovery()
+            }
+            KeyCode::Char('L') if self.library_focused && !self.library_detail => {
+                self.load_more_library()
+            }
+            KeyCode::Char('L') if self.library_focused && self.library_detail => {
+                self.load_more_library_tracks()
+            }
+            KeyCode::Char('L')
+                if !self.queue_focused
+                    && !self.library_focused
+                    && !self.home_focused
+                    && !self.explore_focused =>
+            {
+                self.load_more_search()
+            }
+            KeyCode::Char('f')
+                if !self.queue_focused
+                    && !self.library_focused
+                    && !self.home_focused
+                    && !self.explore_focused =>
+            {
+                self.search_filter = self.search_filter.next();
+                if self.query.is_empty() {
+                    self.status = format!("Search filter: {}", self.search_filter.label());
+                } else {
+                    self.input = self.query.clone();
+                    self.search();
+                }
+            }
+            KeyCode::Enter
+                if !self.queue_focused
+                    && !self.library_focused
+                    && !self.home_focused
+                    && !self.explore_focused
+                    && self.search_filter != SearchFilter::Songs =>
+            {
+                self.open_search_item()
             }
             KeyCode::Enter
                 if (self.home_focused || self.explore_focused) && !self.content_detail =>
@@ -1281,12 +1379,57 @@ impl App {
         self.radio_focused = false;
         self.content_detail = false;
         self.searching = true;
+        self.search_detail = false;
         self.results.clear();
+        self.search_items.clear();
+        self.search_continuation = None;
+        self.search_appending = false;
         self.result_marks.clear();
         self.results_state.select(None);
         self.status.clear();
         let api = self.api.clone();
-        self.search_task = Some(tokio::spawn(async move { api.search(&query).await }));
+        let filter = self.search_filter;
+        self.search_task = Some(tokio::spawn(
+            async move { api.search(&query, filter).await },
+        ));
+    }
+
+    fn load_more_search(&mut self) {
+        let Some(token) = self.search_continuation.clone() else {
+            self.status = "No more search results".into();
+            return;
+        };
+        if let Some(task) = self.search_task.take() {
+            task.abort();
+        }
+        self.searching = true;
+        self.search_appending = true;
+        let api = self.api.clone();
+        let filter = self.search_filter;
+        self.search_task = Some(tokio::spawn(async move {
+            api.search_more(&token, filter).await
+        }));
+    }
+
+    fn open_search_item(&mut self) {
+        let Some(item) = self
+            .results_state
+            .selected()
+            .and_then(|index| self.search_items.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        self.library_focused = true;
+        self.library_detail = true;
+        self.search_detail = true;
+        self.library_loading = true;
+        self.library_detail_continuation = None;
+        self.detail_appending = false;
+        self.results.clear();
+        self.result_marks.clear();
+        let api = self.api.clone();
+        self.detail_task = Some(tokio::spawn(async move { api.library_tracks(&item).await }));
     }
 
     fn load_library(&mut self, kind: LibraryKind) {
@@ -1307,13 +1450,30 @@ impl App {
         self.content_detail = false;
         self.library_kind = kind;
         self.library_detail = false;
+        self.search_detail = false;
         self.library_items.clear();
+        self.library_continuation = None;
         self.library_state.select(None);
         self.library_loading = true;
         self.status.clear();
         self.result_marks.clear();
         let api = self.api.clone();
+        self.library_appending = false;
         self.library_task = Some(tokio::spawn(async move { api.library(kind).await }));
+    }
+
+    fn load_more_library(&mut self) {
+        let Some(token) = self.library_continuation.clone() else {
+            self.status = "No more items in this collection".into();
+            return;
+        };
+        if let Some(task) = self.library_task.take() {
+            task.abort();
+        }
+        self.library_loading = true;
+        self.library_appending = true;
+        let api = self.api.clone();
+        self.library_task = Some(tokio::spawn(async move { api.library_more(&token).await }));
     }
 
     fn open_library_item(&mut self) {
@@ -1326,9 +1486,28 @@ impl App {
             return;
         };
         self.library_loading = true;
+        self.search_detail = false;
+        self.library_detail_continuation = None;
+        self.detail_appending = false;
         self.status.clear();
         let api = self.api.clone();
         self.detail_task = Some(tokio::spawn(async move { api.library_tracks(&item).await }));
+    }
+
+    fn load_more_library_tracks(&mut self) {
+        let Some(token) = self.library_detail_continuation.clone() else {
+            self.status = "No more tracks in this collection".into();
+            return;
+        };
+        if let Some(task) = self.detail_task.take() {
+            task.abort();
+        }
+        self.library_loading = true;
+        self.detail_appending = true;
+        let api = self.api.clone();
+        self.detail_task = Some(tokio::spawn(async move {
+            api.library_tracks_more(&token).await
+        }));
     }
 
     fn load_discovery(&mut self, explore: bool) {
@@ -1480,8 +1659,23 @@ impl App {
         {
             self.library_loading = false;
             match self.library_task.take().unwrap().await {
-                Ok(Ok(items)) => {
-                    self.library_items = items;
+                Ok(Ok(page)) => {
+                    if self.library_appending {
+                        let mut ids = self
+                            .library_items
+                            .iter()
+                            .map(library_item_key)
+                            .collect::<std::collections::HashSet<_>>();
+                        self.library_items.extend(
+                            page.items
+                                .into_iter()
+                                .filter(|item| ids.insert(library_item_key(item))),
+                        );
+                    } else {
+                        self.library_items = page.items;
+                    }
+                    self.library_continuation = page.continuation;
+                    self.library_appending = false;
                     self.library_state
                         .select((!self.library_items.is_empty()).then_some(0));
                 }
@@ -1496,8 +1690,23 @@ impl App {
         {
             self.library_loading = false;
             match self.detail_task.take().unwrap().await {
-                Ok(Ok(tracks)) => {
-                    self.results = tracks;
+                Ok(Ok(page)) => {
+                    if self.detail_appending {
+                        let mut ids = self
+                            .results
+                            .iter()
+                            .map(|track| track.id.clone())
+                            .collect::<std::collections::HashSet<_>>();
+                        self.results.extend(
+                            page.tracks
+                                .into_iter()
+                                .filter(|track| ids.insert(track.id.clone())),
+                        );
+                    } else {
+                        self.results = page.tracks;
+                    }
+                    self.library_detail_continuation = page.continuation;
+                    self.detail_appending = false;
                     self.results_state
                         .select((!self.results.is_empty()).then_some(0));
                     self.result_marks.clear();
@@ -1941,6 +2150,18 @@ fn moved(selected: Option<usize>, len: usize, delta: isize) -> Option<usize> {
     }
 }
 
+fn library_item_key(item: &LibraryItem) -> String {
+    if let Some(track) = &item.track {
+        track.id.clone()
+    } else if !item.playlist_id.is_empty() {
+        item.playlist_id.clone()
+    } else if !item.browse_id.is_empty() {
+        item.browse_id.clone()
+    } else {
+        item.title.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2005,6 +2226,40 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
         assert!(app.editing);
         assert_eq!(app.input, "saved query");
+    }
+
+    #[tokio::test]
+    async fn library_continuation_starts_an_append_request() {
+        let mut app = populated_app().await;
+        app.library_focused = true;
+        app.library_items = vec![LibraryItem {
+            section: String::new(),
+            title: "Album".into(),
+            detail: String::new(),
+            browse_id: "MPREalbum".into(),
+            playlist_id: String::new(),
+            track: None,
+        }];
+        app.library_state.select(Some(0));
+        app.library_continuation = Some("next-library-page".into());
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::SHIFT));
+        assert!(app.library_loading);
+        assert!(app.library_appending);
+        if let Some(task) = app.library_task.take() {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn search_filter_cycles_and_restarts_the_current_query() {
+        let mut app = populated_app().await;
+        app.query = "ambient".into();
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(app.search_filter, SearchFilter::Artists);
+        assert!(app.searching);
+        if let Some(task) = app.search_task.take() {
+            task.abort();
+        }
     }
 
     #[tokio::test]

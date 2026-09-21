@@ -20,12 +20,33 @@ Tokyo Night palette.
 
 ## Install and run
 
-Dymus targets Linux and needs Rust, `mpv`, and `yt-dlp` on `PATH`. Public
+Dymus targets 64-bit Linux and needs `mpv` and `yt-dlp` on `PATH`. Public
 search and World Radio do not require an account. Playback availability depends
 on the track and region.
 
 PipeWire's `pw-dump` and `pw-record` enable audio-reactive visualizers.
 Music playback works without them, using animated fallback visuals.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/britonmearsty/dymus/master/install.sh | sh
+```
+
+The installer verifies the release checksum and installs `dymus` to
+`~/.local/bin` (or `BIN_DIR` if set). Restart your shell or add that directory
+to `PATH`, then run:
+
+```sh
+dymus doctor
+dymus
+```
+
+To install a specific release, set its tag first:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/britonmearsty/dymus/master/install.sh | DYMUS_VERSION=v0.1.0 sh
+```
+
+For a development build, install Rust 1.88 or newer and use:
 
 ```sh
 git clone https://github.com/britonmearsty/dymus.git
@@ -173,7 +194,8 @@ returns to browsing.
 | `a` / `A` | Append to queue / put next |
 | `P` / `Q` | Play all / queue all loaded songs |
 | `R` | Start generated radio from focused song |
-| `L` | Load more items from the focused Home or Explore shelf |
+| `f` | Cycle search results: songs, artists, albums, playlists |
+| `L` | Load more results from Search, a focused Home or Explore shelf, or Library |
 | `d`, Delete | Remove focused or marked queue entries |
 | `J` / `K` | Move focused or marked queue entries down / up |
 | `C` | Clear upcoming tracks without stopping the current track |
@@ -210,8 +232,9 @@ selected station.
 
 ## Limits and troubleshooting
 
-Search loads one page. Generated radio loads one mix and does not continue
-endlessly. Shuffle, repeat, MPRIS, background playback, and queue persistence
+Search can load additional pages with `L`; use `f` to choose songs, artists,
+albums, or playlists, then Enter to open a collection. Generated radio loads
+one mix and does not continue endlessly. Shuffle, repeat, MPRIS, background playback, and queue persistence
 are not included. Queue and search state stay in memory; exiting stops playback.
 Account-restricted tracks are not supported.
 

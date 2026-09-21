@@ -332,12 +332,15 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires YouTube network access, yt-dlp, mpv and a local Unix socket"]
     async fn live_search_resolve_and_stream_audio() {
-        let tracks = crate::innertube::InnerTube::new()
+        let songs = crate::innertube::InnerTube::new()
             .unwrap()
-            .search("Nujabes Feather")
+            .search("Nujabes Feather", crate::innertube::SearchFilter::Songs)
             .await
             .unwrap();
-        let track = tracks.first().expect("live search should return songs");
+        let track = songs
+            .tracks
+            .first()
+            .expect("live search should return songs");
         eprintln!("Streaming smoke test: {} — {}", track.title, track.artist);
         let source = resolve(&track.id).await.unwrap();
         let (sender, mut events) = mpsc::unbounded_channel();
