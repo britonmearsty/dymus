@@ -87,7 +87,7 @@ impl Drop for Player {
     }
 }
 
-async fn resolve(video_id: &str) -> Result<String> {
+pub async fn resolve(video_id: &str) -> Result<String> {
     if let Some(stream_url) = video_id.strip_prefix("radio:") {
         anyhow::ensure!(
             stream_url.starts_with("https://") || stream_url.starts_with("http://"),

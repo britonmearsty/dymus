@@ -6,7 +6,10 @@ use anyhow::{Context, Result, bail};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::HashSet,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 #[derive(Clone)]
 pub struct InnerTube {
@@ -119,6 +122,49 @@ impl InnerTube {
     pub fn with_auth(mut self, auth: BrowserAuth) -> Self {
         self.auth = Some(auth);
         self
+    }
+
+    pub fn is_authenticated(&self) -> bool {
+        self.auth.is_some()
+    }
+
+    /// Records a genuinely played track using YouTube Music's authenticated
+    /// playback-tracking URL. This intentionally obtains a fresh URL per track.
+    pub async fn add_history_item(&self, video_id: &str) -> Result<()> {
+        anyhow::ensure!(self.auth.is_some(), "History reporting requires sign-in");
+        let player = self.request("player", json!({"videoId": video_id})).await?;
+        let tracking_url = player
+            .pointer("/playbackTracking/videostatsPlaybackUrl/baseUrl")
+            .and_then(Value::as_str)
+            .context("YouTube Music did not provide a playback tracking URL")?;
+        let tracking_url = reqwest::Url::parse(tracking_url)
+            .context("YouTube Music returned an invalid playback tracking URL")?;
+        anyhow::ensure!(
+            tracking_url.scheme() == "https" && tracking_url.host_str() == Some("s.youtube.com"),
+            "YouTube Music returned an unexpected playback tracking host"
+        );
+        let nonce = format!(
+            "{:016x}",
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64
+        );
+        let auth = self.auth.as_ref().expect("checked above");
+        self.client
+            .get(tracking_url)
+            .query(&[("ver", "2"), ("c", "WEB_REMIX"), ("cpn", nonce.as_str())])
+            .header("Origin", "https://music.youtube.com")
+            .header("Referer", "https://music.youtube.com/")
+            .header(reqwest::header::COOKIE, auth.cookie())
+            .header("X-Goog-AuthUser", auth.auth_user())
+            .header(
+                reqwest::header::AUTHORIZATION,
+                auth.authorization(auth::unix_timestamp()?)?,
+            )
+            .send()
+            .await
+            .context("Cannot report playback to YouTube Music")?
+            .error_for_status()
+            .context("YouTube Music rejected the playback report")?;
+        Ok(())
     }
 
     pub async fn validate_session(&self) -> Result<String> {

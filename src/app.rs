@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeSet, VecDeque},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
@@ -193,6 +193,9 @@ pub struct App {
     pub searching: bool,
     pub playback: Playback,
     pub position: f64,
+    history_reported: bool,
+    lastfm_reported: bool,
+    lastfm_started_at: Option<u64>,
     pub duration: f64,
     pub volume: u8,
     api: InnerTube,
@@ -286,6 +289,9 @@ impl App {
             searching: false,
             playback: Playback::Idle,
             position: 0.0,
+            history_reported: false,
+            lastfm_reported: false,
+            lastfm_started_at: None,
             duration: 0.0,
             volume: 70,
             api: InnerTube::configured()?,
@@ -1725,6 +1731,9 @@ impl App {
     fn play(&mut self, track: Track) {
         self.generation += 1;
         self.position = 0.0;
+        self.history_reported = false;
+        self.lastfm_reported = false;
+        self.lastfm_started_at = None;
         self.duration = 0.0;
         self.playback = Playback::Loading;
         self.audio_bands.clear();
@@ -1927,8 +1936,13 @@ impl App {
         match event {
             Event::Loaded => {
                 self.playback = Playback::Playing;
+                self.start_lastfm();
             }
-            Event::Position(position) => self.position = position,
+            Event::Position(position) => {
+                self.position = position;
+                self.maybe_report_history();
+                self.maybe_scrobble_lastfm();
+            }
             Event::Duration(duration) => self.duration = duration,
             Event::AudioFrame(frame) => {
                 if self.audio_bands.len() == frame.bands.len() {
@@ -1975,6 +1989,97 @@ impl App {
                 self.status = format!("{error} · r to retry, n to skip");
             }
         }
+    }
+
+    fn maybe_report_history(&mut self) {
+        if self.history_reported
+            || !self.config.report_history
+            || self.position < self.config.report_history_after_seconds as f64
+            || !self.api.is_authenticated()
+        {
+            return;
+        }
+        let Some(track) = &self.queue.current else {
+            return;
+        };
+        self.history_reported = true;
+        let api = self.api.clone();
+        let video_id = track.id.clone();
+        tokio::spawn(async move {
+            // History is supplemental: reporting failure must never interrupt playback.
+            if let Err(error) = api.add_history_item(&video_id).await {
+                eprintln!("Could not report playback history: {error:#}");
+            }
+        });
+    }
+
+    fn start_lastfm(&mut self) {
+        if !self.config.lastfm_scrobbling
+            || self
+                .queue
+                .current
+                .as_ref()
+                .is_none_or(|track| track.id.starts_with("radio:"))
+        {
+            return;
+        }
+        let Some(credentials) = crate::auth::load_lastfm().ok().flatten() else {
+            return;
+        };
+        let Ok(client) = crate::lastfm::Client::new(credentials) else {
+            return;
+        };
+        let track = self.queue.current.clone().expect("checked above");
+        let duration = self
+            .duration
+            .max(crate::lastfm::duration_seconds(&track) as f64) as u64;
+        self.lastfm_started_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|time| time.as_secs());
+        tokio::spawn(async move {
+            if let Err(error) = client.now_playing(&track, duration).await {
+                eprintln!("Could not update Last.fm now playing: {error:#}");
+            }
+        });
+    }
+
+    fn maybe_scrobble_lastfm(&mut self) {
+        if self.lastfm_reported || !self.config.lastfm_scrobbling {
+            return;
+        }
+        let Some(track) = self
+            .queue
+            .current
+            .clone()
+            .filter(|track| !track.id.starts_with("radio:"))
+        else {
+            return;
+        };
+        let duration = self
+            .duration
+            .max(crate::lastfm::duration_seconds(&track) as f64) as u64;
+        let Some(eligible_after) = crate::lastfm::eligible_after(duration) else {
+            return;
+        };
+        if self.position < eligible_after as f64 {
+            return;
+        }
+        let Some(started_at) = self.lastfm_started_at else {
+            return;
+        };
+        let Some(credentials) = crate::auth::load_lastfm().ok().flatten() else {
+            return;
+        };
+        let Ok(client) = crate::lastfm::Client::new(credentials) else {
+            return;
+        };
+        self.lastfm_reported = true;
+        tokio::spawn(async move {
+            if let Err(error) = client.scrobble(&track, duration, started_at).await {
+                eprintln!("Could not scrobble to Last.fm: {error:#}");
+            }
+        });
     }
 
     fn set_volume(&mut self, volume: u8) {

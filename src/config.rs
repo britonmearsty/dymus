@@ -12,6 +12,14 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub theme: String,
     pub start_view: String,
+    /// Number of matches shown by the interactive headless playback picker.
+    pub headless_results: usize,
+    /// Send authenticated playback history after the configured listen threshold.
+    pub report_history: bool,
+    /// Seconds listened before an eligible track is added to YouTube Music history.
+    pub report_history_after_seconds: u64,
+    /// Submit eligible plays to Last.fm when credentials are configured.
+    pub lastfm_scrobbling: bool,
     pub colors: Colors,
     pub keybindings: KeyBindings,
 }
@@ -21,6 +29,10 @@ impl Default for Config {
         Self {
             theme: "tokyo-night".into(),
             start_view: "home".into(),
+            headless_results: 5,
+            report_history: false,
+            report_history_after_seconds: 30,
+            lastfm_scrobbling: true,
             colors: Colors::default(),
             keybindings: KeyBindings::default(),
         }
@@ -182,6 +194,8 @@ impl Config {
         } else if !START_VIEWS.contains(&self.start_view.as_str()) {
             self.start_view = "home".into();
         }
+        self.headless_results = self.headless_results.clamp(1, 25);
+        self.report_history_after_seconds = self.report_history_after_seconds.clamp(1, 3600);
     }
 
     pub fn load() -> Result<Self> {
@@ -221,7 +235,7 @@ impl Config {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Cannot create {}", parent.display()))?;
             let body = format!(
-                "# Dymus user configuration.\n# Available themes: tokyo-night, catppuccin-mocha, gruvbox-dark, nord.\n# Start view: home, explore, playlists, albums, artists, podcasts, radio, search, or queue.\n# Colors are optional six-digit hex overrides (examples below use Tokyo Night).\n# Uncomment and edit any value:\n# [colors]\n# text = \"#c0caf5\"\n# secondary = \"#a9b1d6\"\n# muted = \"#737aa2\"\n# accent = \"#7aa2f7\"\n# good = \"#9ece6a\"\n# warning = \"#e0af68\"\n# error = \"#f7768e\"\n\n{}",
+                "# Dymus user configuration.\n# Available themes: tokyo-night, catppuccin-mocha, gruvbox-dark, nord.\n# Start view: home, explore, playlists, albums, artists, podcasts, radio, search, or queue.\n# Headless picker results: 1 through 25.\n# YouTube Music history reporting is off by default; threshold: 1 through 3600 seconds.\n# Last.fm scrobbling is on by default when Last.fm credentials exist.\n# Colors are optional six-digit hex overrides (examples below use Tokyo Night).\n# Uncomment and edit any value:\n# [colors]\n# text = \"#c0caf5\"\n# secondary = \"#a9b1d6\"\n# muted = \"#737aa2\"\n# accent = \"#7aa2f7\"\n# good = \"#9ece6a\"\n# warning = \"#e0af68\"\n# error = \"#f7768e\"\n\n{}",
                 toml::to_string_pretty(self)?
             );
             fs::write(&path, body).with_context(|| format!("Cannot write {}", path.display()))

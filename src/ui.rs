@@ -1218,35 +1218,56 @@ fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     let mut previous_section = "";
-    let rows = app.discovery_items.iter().map(|item| {
-        let section = if item.section == previous_section {
-            ""
-        } else {
-            previous_section = &item.section;
-            item.section.as_str()
-        };
-        Row::new(vec![
-            Cell::from(section).style(Style::default().fg(muted_color())),
+    let mut rows = Vec::new();
+    let mut item_rows = Vec::with_capacity(app.discovery_items.len());
+    for item in &app.discovery_items {
+        let starts_section = item.section != previous_section && !item.section.trim().is_empty();
+        previous_section = &item.section;
+
+        if starts_section {
+            // Headings are display-only rows: they are not part of keyboard
+            // selection, and their single leading spacer separates sections.
+            rows.push(Row::new(vec![Cell::default(), Cell::default()]));
+            rows.push(Row::new(vec![
+                Cell::from(item.section.as_str()).style(
+                    Style::default()
+                        .fg(muted_color())
+                        .add_modifier(Modifier::ITALIC | Modifier::UNDERLINED),
+                ),
+                Cell::default(),
+            ]));
+        }
+        item_rows.push(rows.len());
+        rows.push(Row::new(vec![
             Cell::from(item.title.as_str()),
             Cell::from(item.detail.as_str()).style(Style::default().fg(secondary_color())),
-        ])
-    });
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(18),
-            Constraint::Fill(2),
-            Constraint::Fill(1),
-        ],
-    )
-    .column_spacing(2)
-    .highlight_symbol("› ")
-    .row_highlight_style(
-        Style::default()
-            .fg(accent_color())
-            .add_modifier(Modifier::BOLD),
-    );
-    frame.render_stateful_widget(table, tabs[1], &mut app.discovery_state);
+        ]));
+    }
+    let table = Table::new(rows, [Constraint::Fill(2), Constraint::Fill(1)])
+        .column_spacing(2)
+        .highlight_symbol("› ")
+        .row_highlight_style(
+            Style::default()
+                .fg(accent_color())
+                .add_modifier(Modifier::BOLD),
+        );
+    let selected = app
+        .discovery_state
+        .selected()
+        .and_then(|index| item_rows.get(index))
+        .copied();
+    let offset = item_rows
+        .get(app.discovery_state.offset())
+        .copied()
+        .unwrap_or_default();
+    let mut display_state = TableState::new()
+        .with_selected(selected)
+        .with_offset(offset);
+    frame.render_stateful_widget(table, tabs[1], &mut display_state);
+    *app.discovery_state.offset_mut() = item_rows
+        .iter()
+        .position(|&row| row >= display_state.offset())
+        .unwrap_or_else(|| item_rows.len().saturating_sub(1));
 }
 
 fn library(frame: &mut Frame, app: &mut App, area: Rect) {

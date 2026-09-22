@@ -19,6 +19,23 @@ pub struct BrowserAuth {
     auth_user: String,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+pub struct LastFmAuth {
+    pub api_key: String,
+    pub shared_secret: String,
+    pub session_key: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct AuthFile {
+    #[serde(default)]
+    cookie: Option<String>,
+    #[serde(default = "default_auth_user")]
+    auth_user: String,
+    #[serde(default)]
+    lastfm: Option<LastFmAuth>,
+}
+
 fn default_auth_user() -> String {
     "0".into()
 }
@@ -128,11 +145,39 @@ pub fn load() -> Result<Option<BrowserAuth>> {
         );
     }
     let file = fs::File::open(path)?;
-    let auth: BrowserAuth = serde_json::from_reader(file)
+    let auth: AuthFile = serde_json::from_reader(file)
         .context("Dymus auth file is invalid; run `dymus auth paste` again")?;
-    BrowserAuth::from_cookie(auth.cookie, &auth.auth_user)
+    let cookie = auth
+        .cookie
+        .context("No YouTube Music credentials are configured")?;
+    BrowserAuth::from_cookie(cookie, &auth.auth_user)
         .context("Dymus auth file contains invalid credentials")
         .map(Some)
+}
+
+pub fn load_lastfm() -> Result<Option<LastFmAuth>> {
+    let path = auth_path()?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("Cannot inspect {}", path.display()));
+        }
+    };
+    ensure!(
+        metadata.file_type().is_file(),
+        "Dymus auth file must be a regular file"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        ensure!(
+            metadata.permissions().mode() & 0o077 == 0,
+            "Dymus auth file permissions are too open; run `chmod 600 {}`",
+            path.display()
+        );
+    }
+    Ok(serde_json::from_reader::<_, AuthFile>(fs::File::open(path)?)?.lastfm)
 }
 
 pub fn save(auth: &BrowserAuth) -> Result<()> {
@@ -150,13 +195,91 @@ pub fn save(auth: &BrowserAuth) -> Result<()> {
     }
     let mut temporary = tempfile::NamedTempFile::new_in(&directory)
         .context("Cannot create private credentials file")?;
-    serde_json::to_writer(&mut temporary, auth).context("Cannot encode authentication data")?;
+    let lastfm = load_lastfm().unwrap_or(None);
+    serde_json::to_writer(
+        &mut temporary,
+        &AuthFile {
+            cookie: Some(auth.cookie.clone()),
+            auth_user: auth.auth_user.clone(),
+            lastfm,
+        },
+    )
+    .context("Cannot encode authentication data")?;
     temporary.write_all(b"\n")?;
     temporary.as_file().sync_all()?;
     temporary
         .persist(auth_path()?)
         .context("Cannot save Dymus credentials")?;
     Ok(())
+}
+
+pub fn save_lastfm(lastfm: LastFmAuth) -> Result<()> {
+    let directory = config_dir()?;
+    fs::create_dir_all(&directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+    }
+    let existing = load_auth_file()?.unwrap_or(AuthFile {
+        cookie: None,
+        auth_user: default_auth_user(),
+        lastfm: None,
+    });
+    let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
+    serde_json::to_writer(
+        &mut temporary,
+        &AuthFile {
+            cookie: existing.cookie,
+            auth_user: existing.auth_user,
+            lastfm: Some(lastfm),
+        },
+    )?;
+    temporary.write_all(b"\n")?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(auth_path()?)?;
+    Ok(())
+}
+
+fn load_auth_file() -> Result<Option<AuthFile>> {
+    let path = auth_path()?;
+    match fs::File::open(path) {
+        Ok(file) => Ok(Some(serde_json::from_reader(file)?)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn logout_lastfm() -> Result<bool> {
+    let Some(mut auth) = load_auth_file()? else {
+        return Ok(false);
+    };
+    if auth.lastfm.take().is_none() {
+        return Ok(false);
+    }
+    if auth.cookie.is_none() {
+        fs::remove_file(auth_path()?).context("Cannot remove Last.fm credentials")?;
+        return Ok(true);
+    }
+    let directory = config_dir()?;
+    let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
+    serde_json::to_writer(&mut temporary, &auth)?;
+    temporary.write_all(b"\n")?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(auth_path()?)?;
+    Ok(true)
+}
+
+pub fn prompt_lastfm() -> Result<LastFmAuth> {
+    ensure!(
+        io::stdin().is_terminal(),
+        "Last.fm setup must run in a terminal"
+    );
+    Ok(LastFmAuth {
+        api_key: rpassword::prompt_password("Last.fm API key: ")?,
+        shared_secret: rpassword::prompt_password("Last.fm shared secret: ")?,
+        session_key: rpassword::prompt_password("Last.fm session key: ")?,
+    })
 }
 
 pub fn logout() -> Result<bool> {

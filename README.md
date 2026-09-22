@@ -72,6 +72,71 @@ Search can run without opening the TUI and returns JSON:
 cargo run -- search "Nujabes Feather"
 ```
 
+## Headless playback
+
+Play without opening the TUI by choosing the kind of result to resolve. Song
+searches show the first five matching tracks; album and playlist searches show
+the first five matching collections. Choose the numbered result to play it.
+Set `headless_results` in `~/.config/dymus/config.toml` to show between 1 and
+25 matches instead; the default is 5:
+
+```toml
+headless_results = 10
+```
+
+To add authenticated tracks to YouTube Music history after they have genuinely
+played, opt in explicitly (it is off by default):
+
+```toml
+report_history = true
+report_history_after_seconds = 30
+```
+
+The threshold accepts 1 through 3600 seconds. Reporting failures never stop
+playback.
+
+## Last.fm scrobbling
+
+Create a Last.fm API application, then run `dymus lastfm login` and approve the
+printed authorization URL. Alternatively, `dymus lastfm paste` accepts an
+existing API key, shared secret, and session key privately. Dymus verifies the
+session before saving it. Every eligible non-radio track updates Last.fm Now Playing
+when playback loads and is scrobbled after the service's rule: more than 30
+seconds long and played for half its duration or four minutes, whichever comes
+first. This is enabled by default whenever credentials exist; set
+`lastfm_scrobbling = false` in the configuration to disable it. Use
+`dymus lastfm status` to recheck the connection or `dymus lastfm logout` to
+remove only those credentials.
+
+```sh
+dymus play song "Nujabes Feather"
+dymus play album "Modal Soul"
+dymus play playlist "Lo-fi beats" --detach --volume 65
+dymus play library playlists --detach
+```
+
+Without `--detach`, the command stays attached until mpv exits. Detached
+playback remains available after the shell command ends and can be controlled
+from any terminal in the same user session:
+
+```sh
+dymus control status
+dymus control toggle
+dymus control next
+dymus control volume 50
+dymus control stop
+```
+
+Attached playback keeps one terminal line updated with the active track,
+play/pause state, and elapsed time. Use `--detach` when that display is not
+needed.
+
+The control socket is local to your user session and only one headless Dymus
+player can run at a time. Headless album and playlist playback may need YouTube
+Music credentials; configure them with `dymus auth paste` when required.
+Only the first selected track is resolved before playback starts. Remaining
+album or playlist tracks are resolved and added to mpv in the background.
+
 ## How it works
 
 Home, Explore, search, library, and generated radio requests use YouTube Music's
