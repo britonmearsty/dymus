@@ -1,0 +1,42 @@
+name: Bug report
+description: Report a crash, misbehavior, or rendering problem
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: What happened, and what did you expect to happen?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `dymus --version` (or the commit if building from source).
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Terminal and size
+      description: Terminal emulator and dimensions, e.g. Alacritty, 120x40.
+      placeholder: Alacritty, 120x40
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1. 
+        2. 
+        3.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log output
+      description: Paste `RUST_LOG=debug dymus` output if available.
+      render: text
