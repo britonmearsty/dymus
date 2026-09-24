@@ -8,7 +8,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::innertube::DiscoveryPage;
+use crate::{innertube::DiscoveryPage, model::Track};
 
 const VERSION: u8 = 1;
 
@@ -33,6 +33,36 @@ pub fn store_discovery(explore: bool, page: &DiscoveryPage) {
     let _ = store_at(&path, page);
 }
 
+/// The playback queue is small, private local state. It is restored as
+/// upcoming items only, so launching Dymus never starts media unexpectedly.
+pub fn load_queue() -> Option<Vec<Track>> {
+    #[cfg(test)]
+    return None;
+    #[cfg(not(test))]
+    {
+        let path = cache_root().ok()?.join("queue.json");
+        serde_json::from_slice(&fs::read(path).ok()?).ok()
+    }
+}
+
+pub fn store_queue(queue: &[Track]) {
+    #[cfg(test)]
+    {
+        let _ = queue;
+    }
+    #[cfg(not(test))]
+    {
+        let Ok(root) = cache_root() else { return };
+        let _ = fs::create_dir_all(&root);
+        let Ok(mut temporary) = tempfile::NamedTempFile::new_in(&root) else {
+            return;
+        };
+        if serde_json::to_writer(&mut temporary, queue).is_ok() {
+            let _ = temporary.persist(root.join("queue.json"));
+        }
+    }
+}
+
 fn load_from(path: &Path) -> Option<DiscoveryPage> {
     let cache: DiscoveryCache = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
     (cache.version == VERSION).then_some(cache.page)
@@ -52,6 +82,10 @@ fn store_at(path: &Path, page: &DiscoveryPage) -> anyhow::Result<()> {
 }
 
 fn cache_path(explore: bool) -> anyhow::Result<PathBuf> {
+    Ok(cache_root()?.join(if explore { "explore.json" } else { "home.json" }))
+}
+
+fn cache_root() -> anyhow::Result<PathBuf> {
     let base = if let Some(xdg) = env::var_os("XDG_CACHE_HOME").filter(|value| !value.is_empty()) {
         PathBuf::from(xdg)
     } else {
@@ -60,9 +94,7 @@ fn cache_path(explore: bool) -> anyhow::Result<PathBuf> {
         )
         .join(".cache")
     };
-    Ok(base
-        .join("dymus")
-        .join(if explore { "explore.json" } else { "home.json" }))
+    Ok(base.join("dymus"))
 }
 
 #[cfg(test)]

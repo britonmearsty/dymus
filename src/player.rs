@@ -1,7 +1,7 @@
 //! Stream extraction and audio playback live outside the terminal event loop.
-use std::{process::Stdio, time::Duration};
+use std::{io::Write, process::Stdio, time::Duration};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -29,6 +29,7 @@ pub struct Player {
     sender: UnboundedSender<(u64, Event)>,
     commands: Option<UnboundedSender<Value>>,
     task: Option<JoinHandle<()>>,
+    preload_task: Option<JoinHandle<()>>,
 }
 
 impl Player {
@@ -39,6 +40,7 @@ impl Player {
             sender,
             commands: None,
             task: None,
+            preload_task: None,
         }
     }
 
@@ -59,6 +61,39 @@ impl Player {
         }));
     }
 
+    /// Resolve the following track while the current one is playing, then add
+    /// it to mpv's playlist. Keeping one mpv process alive avoids the audible
+    /// gap caused by launching a new resolver and audio device at EOF.
+    pub fn preload(&mut self, generation: u64, video_id: String) {
+        if let Some(task) = self.preload_task.take() {
+            task.abort();
+        }
+        let Some(commands) = self.commands.clone() else {
+            return;
+        };
+        let sender = self.sender.clone();
+        self.preload_task = Some(tokio::spawn(async move {
+            match resolve(&video_id).await {
+                Ok(source) => {
+                    let _ = commands.send(json!(["loadfile", source, "append"]));
+                }
+                Err(error) => {
+                    let _ = sender.send((
+                        generation,
+                        Event::Notice(format!("Could not preload next track: {error:#}")),
+                    ));
+                }
+            }
+        }));
+    }
+
+    pub fn clear_preloaded(&mut self) {
+        if let Some(task) = self.preload_task.take() {
+            task.abort();
+        }
+        self.command(json!(["playlist-remove", 1]));
+    }
+
     pub fn command(&self, command: Value) {
         if let Some(sender) = &self.commands {
             let _ = sender.send(command);
@@ -67,6 +102,9 @@ impl Player {
 
     pub fn stop(&mut self) {
         self.commands = None;
+        if let Some(task) = self.preload_task.take() {
+            task.abort();
+        }
         if let Some(task) = self.task.take() {
             task.abort();
         }
@@ -95,18 +133,28 @@ pub async fn resolve(video_id: &str) -> Result<String> {
         );
         return Ok(stream_url.to_owned());
     }
+    // yt-dlp needs the same authenticated browser session as InnerTube when
+    // YouTube presents a bot check. Keep its Netscape jar private and alive
+    // only for this child process; it is never a command-line argument itself.
+    let cookies = crate::auth::load()?
+        .map(|auth| youtube_cookie_jar(auth.cookie()))
+        .transpose()?;
+    let mut command = Command::new("yt-dlp");
+    command.args([
+        "--ignore-config",
+        "--no-playlist",
+        "--no-warnings",
+        "--format",
+        "bestaudio/best",
+        "--get-url",
+    ]);
+    if let Some(cookies) = &cookies {
+        command.arg("--cookies").arg(cookies.path());
+    }
     let output = tokio::time::timeout(
         Duration::from_secs(45),
-        Command::new("yt-dlp")
-            .args([
-                "--ignore-config",
-                "--no-playlist",
-                "--no-warnings",
-                "--format",
-                "bestaudio/best",
-                "--get-url",
-                "--",
-            ])
+        command
+            .arg("--")
             .arg(format!("https://music.youtube.com/watch?v={video_id}"))
             .stdin(Stdio::null())
             .kill_on_drop(true)
@@ -117,7 +165,10 @@ pub async fn resolve(video_id: &str) -> Result<String> {
     .context("Cannot start yt-dlp; run `dymus doctor`")?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
-        bail!("Stream lookup failed: {}", error.trim());
+        bail!(
+            "yt-dlp could not resolve this stream: {}. Run `dymus doctor`; if yt-dlp is installed, update it and try another track",
+            error.trim()
+        );
     }
     let text = String::from_utf8(output.stdout).context("Invalid stream URL")?;
     let url = text
@@ -125,6 +176,34 @@ pub async fn resolve(video_id: &str) -> Result<String> {
         .find(|line| line.starts_with("https://") || line.starts_with("http://"))
         .context("yt-dlp returned no playable stream")?;
     Ok(url.to_owned())
+}
+
+fn youtube_cookie_jar(cookie_header: &str) -> Result<tempfile::NamedTempFile> {
+    let mut jar =
+        tempfile::NamedTempFile::new().context("Cannot create private yt-dlp cookie jar")?;
+    jar.write_all(b"# Netscape HTTP Cookie File\n")?;
+    let mut count = 0;
+    for part in cookie_header.split(';') {
+        let Some((name, value)) = part.trim().split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        let value = value.trim();
+        ensure!(
+            !name.is_empty() && !value.is_empty(),
+            "Saved YouTube cookie is invalid"
+        );
+        ensure!(
+            name.bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+            "Saved YouTube cookie has an invalid name"
+        );
+        writeln!(jar, ".youtube.com\tTRUE\t/\tTRUE\t0\t{name}\t{value}")?;
+        count += 1;
+    }
+    ensure!(count > 0, "Saved YouTube cookie is empty");
+    jar.as_file().sync_all()?;
+    Ok(jar)
 }
 
 async fn playback(
@@ -160,7 +239,7 @@ async fn playback(
     }
     let mut child = command
         .spawn()
-        .context("Cannot start mpv; run `dymus doctor`")?;
+        .context("Cannot start mpv; install or repair mpv, then run `dymus doctor`")?;
     let socket = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Some(status) = child.try_wait()? {
@@ -215,8 +294,7 @@ async fn playback(
                         match message["reason"].as_str() {
                             Some("eof") => {
                                 let _ = sender.send((generation, Event::Ended));
-                                child.kill().await?;
-                                return Ok(());
+                                None
                             }
                             Some("error") => bail!("mpv could not play the stream: {}", message["file_error"].as_str().unwrap_or("unknown playback error")),
                             _ => None,
@@ -321,6 +399,18 @@ async fn write_command(write: &mut tokio::net::unix::OwnedWriteHalf, command: Va
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Seek, SeekFrom};
+
+    #[test]
+    fn writes_a_netscape_cookie_jar_for_youtube() {
+        let mut jar = youtube_cookie_jar("SID=session; __Secure-3PAPISID=token").unwrap();
+        let mut body = String::new();
+        jar.seek(SeekFrom::Start(0)).unwrap();
+        jar.read_to_string(&mut body).unwrap();
+        assert!(body.starts_with("# Netscape HTTP Cookie File\n"));
+        assert!(body.contains(".youtube.com\tTRUE\t/\tTRUE\t0\tSID\tsession"));
+        assert!(body.contains("__Secure-3PAPISID\ttoken"));
+    }
 
     #[tokio::test]
     async fn radio_streams_skip_youtube_resolution() {

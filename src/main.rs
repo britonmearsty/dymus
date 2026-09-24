@@ -12,8 +12,9 @@ mod radio;
 mod ui;
 mod visualizer;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
+use crossterm::style::{Color, Stylize};
 use std::{io::IsTerminal, time::Duration};
 
 #[derive(Parser)]
@@ -261,26 +262,52 @@ async fn main() -> Result<()> {
 
 async fn doctor() -> Result<()> {
     for program in ["mpv", "yt-dlp"] {
-        let output = tokio::time::timeout(
+        let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             tokio::process::Command::new(program)
                 .arg("--version")
                 .kill_on_drop(true)
                 .output(),
         )
-        .await
-        .context("Dependency check timed out")?
-        .with_context(|| format!("Install {program} and ensure it is on PATH"))?;
+        .await;
+        let output = match result {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => {
+                let message = format!(
+                    "{program} is not available: {error}; {}",
+                    dependency_help(program)
+                );
+                doctor_error(&message);
+                bail!(message);
+            }
+            Err(_) => {
+                let message =
+                    format!("{program} did not respond within 10 seconds; reinstall or check PATH");
+                doctor_error(&message);
+                bail!(message);
+            }
+        };
         if !output.status.success() {
-            bail!("{program} --version failed");
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            let message = format!(
+                "{program} --version failed{}; {}",
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {detail}")
+                },
+                dependency_help(program),
+            );
+            doctor_error(&message);
+            bail!(message);
         }
-        println!(
+        doctor_ok(&format!(
             "{program}: {}",
             String::from_utf8_lossy(&output.stdout)
                 .lines()
                 .next()
                 .unwrap_or("available")
-        );
+        ));
     }
     let mut pipewire_tools = true;
     for program in ["pw-dump", "pw-record"] {
@@ -289,10 +316,12 @@ async fn doctor() -> Result<()> {
             .output()
             .await
         {
-            Ok(output) if output.status.success() => println!("{program}: available"),
+            Ok(output) if output.status.success() => doctor_ok(&format!("{program}: available")),
             _ => {
                 pipewire_tools = false;
-                println!("{program}: missing (audio-reactive visualizers unavailable)");
+                doctor_warning(&format!(
+                    "{program}: missing (audio-reactive visualizers unavailable)"
+                ));
             }
         }
     }
@@ -302,11 +331,62 @@ async fn doctor() -> Result<()> {
             .output()
             .await
         {
-            Ok(output) if output.status.success() => println!("PipeWire session: connected"),
-            _ => {
-                println!("PipeWire session: unavailable (visualizers will use animation fallback)")
-            }
+            Ok(output) if output.status.success() => doctor_ok("PipeWire session: connected"),
+            _ => doctor_warning(
+                "PipeWire session: unavailable (visualizers will use animation fallback)",
+            ),
         }
     }
     Ok(())
+}
+
+fn doctor_ok(message: &str) {
+    doctor_line("✓", Color::Green, message, Color::White);
+}
+fn doctor_warning(message: &str) {
+    doctor_line("!", Color::Yellow, message, Color::Yellow);
+}
+fn doctor_error(message: &str) {
+    let (summary, detail) = message.split_once(';').unwrap_or((message, ""));
+    eprintln!(
+        "{} {}{}",
+        "✗".with(Color::Red).bold(),
+        summary.with(Color::Red).bold(),
+        if detail.is_empty() {
+            String::new()
+        } else {
+            format!("; {}", detail.with(Color::Yellow))
+        },
+    );
+}
+
+fn doctor_line(icon: &str, icon_color: Color, message: &str, detail_color: Color) {
+    let (label, detail) = message.split_once(": ").unwrap_or((message, ""));
+    println!(
+        "{} {}{}",
+        icon.with(icon_color).bold(),
+        label.with(Color::Cyan).bold(),
+        if detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", detail.with(detail_color))
+        },
+    );
+}
+
+fn dependency_help(program: &str) -> String {
+    let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let command = if os_release.contains("ID=arch") || os_release.contains("ID_LIKE=arch") {
+        format!("install it with `sudo pacman -S {program}`")
+    } else if os_release.contains("ID=fedora") || os_release.contains("ID_LIKE=\"fedora") {
+        format!("install it with `sudo dnf install {program}`")
+    } else if os_release.contains("ID=debian")
+        || os_release.contains("ID=ubuntu")
+        || os_release.contains("ID_LIKE=debian")
+    {
+        format!("install it with `sudo apt install {program}`")
+    } else {
+        format!("install `{program}` with your distribution's package manager")
+    };
+    format!("{command}, then run `dymus doctor`")
 }

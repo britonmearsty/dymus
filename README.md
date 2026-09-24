@@ -193,8 +193,9 @@ radio, and World Radio work without an account.
 
 Credentials live in `$XDG_CONFIG_HOME/dymus/auth.json` (normally
 `~/.config/dymus/auth.json`). Dymus creates the directory with `0700` and the
-file with `0600`, only attaches the session to `music.youtube.com` requests,
-and never reads browser profiles or logs cookie values. The file is protected by
+file with `0600`. For authenticated stream resolution it creates a private,
+short-lived yt-dlp cookie jar and removes it as soon as the resolver exits; it
+never reads browser profiles or logs cookie values. The file is protected by
 filesystem permissions but is not encrypted.
 
 Browser cookies are bearer credentials. Do not put them in issues, chat, shell
@@ -299,8 +300,9 @@ selected station.
 
 Search can load additional pages with `L`; use `f` to choose songs, artists,
 albums, or playlists, then Enter to open a collection. Generated radio loads
-one mix and does not continue endlessly. Shuffle, repeat, MPRIS, background playback, and queue persistence
-are not included. Queue and search state stay in memory; exiting stops playback.
+one mix and does not continue endlessly. MPRIS and background playback are not
+included. Queue and search state stay in memory; exiting stops playback, though
+the upcoming queue is saved and restored on the next launch.
 Account-restricted tracks are not supported.
 
 InnerTube is unofficial and may change. Stream extraction relies on a current

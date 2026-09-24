@@ -10,13 +10,23 @@ pub struct Track {
     pub duration: String,
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct Queue {
     pub current: Option<Track>,
     pub upcoming: VecDeque<Track>,
 }
 
 impl Queue {
+    pub fn shuffle(&mut self, mut seed: u64) {
+        let items = self.upcoming.make_contiguous();
+        for index in (1..items.len()).rev() {
+            // Small local PRNG avoids adding a dependency solely for queue order.
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            items.swap(index, (seed as usize) % (index + 1));
+        }
+    }
     pub fn prepend(&mut self, tracks: Vec<Track>) {
         for track in tracks.into_iter().rev() {
             self.upcoming.push_front(track);
@@ -102,6 +112,20 @@ mod tests {
             queue.upcoming,
             [track("a"), track("b"), track("c"), track("e"), track("d")]
         );
+    }
+
+    #[test]
+    fn shuffling_keeps_every_upcoming_track() {
+        let mut queue = Queue::default();
+        queue.upcoming.extend([track("a"), track("b"), track("c")]);
+        queue.shuffle(7);
+        let mut ids: Vec<_> = queue
+            .upcoming
+            .iter()
+            .map(|track| track.id.as_str())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["a", "b", "c"]);
     }
 
     #[test]

@@ -34,6 +34,30 @@ pub enum Playback {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RepeatMode {
+    Off,
+    Track,
+    Queue,
+}
+
+impl RepeatMode {
+    fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Track,
+            Self::Track => Self::Queue,
+            Self::Queue => Self::Off,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Track => "track",
+            Self::Queue => "queue",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NowPanel {
     Queue,
     Visualizer,
@@ -194,6 +218,8 @@ pub struct App {
     pub playback: Playback,
     pub position: f64,
     history_reported: bool,
+    repeat_mode: RepeatMode,
+    repeat_history: Vec<Track>,
     lastfm_reported: bool,
     lastfm_started_at: Option<u64>,
     pub duration: f64,
@@ -215,11 +241,17 @@ pub struct App {
     stations_task: Option<JoinHandle<Result<Vec<Station>>>>,
     cover_task: Option<JoinHandle<(u64, Option<CoverArt>)>>,
     lyrics_task: Option<JoinHandle<(u64, Result<Option<crate::lyrics::Lyrics>>)>>,
+    auth_task: Option<JoinHandle<Result<String>>>,
 }
 
 impl App {
     pub async fn new() -> Result<Self> {
         let config = Config::load()?;
+        let api = InnerTube::configured()?;
+        let auth_task = api.is_authenticated().then(|| {
+            let api = api.clone();
+            tokio::spawn(async move { api.validate_session().await })
+        });
         Ok(Self {
             input: String::new(),
             editing: true,
@@ -229,7 +261,10 @@ impl App {
             search_filter: SearchFilter::Songs,
             search_continuation: None,
             results_state: TableState::default(),
-            queue: Queue::default(),
+            queue: Queue {
+                current: None,
+                upcoming: cache::load_queue().unwrap_or_default().into(),
+            },
             queue_state: TableState::default(),
             queue_focused: false,
             library_focused: false,
@@ -290,11 +325,13 @@ impl App {
             playback: Playback::Idle,
             position: 0.0,
             history_reported: false,
+            repeat_mode: RepeatMode::Off,
+            repeat_history: Vec::new(),
             lastfm_reported: false,
             lastfm_started_at: None,
             duration: 0.0,
             volume: 70,
-            api: InnerTube::configured()?,
+            api,
             player: Player::new(),
             radio_api: RadioBrowser::new()?,
             generation: 0,
@@ -311,10 +348,14 @@ impl App {
             stations_task: None,
             cover_task: None,
             lyrics_task: None,
+            auth_task,
         })
     }
 
     pub fn start(&mut self) {
+        if self.auth_task.is_none() {
+            self.status = "Not signed in — public music works; run `dymus auth paste` for library and restricted playback".into();
+        }
         self.editing = self.config.start_view == "search";
         match self.config.start_view.as_str() {
             "home" => {
@@ -388,6 +429,7 @@ impl App {
         let mut tick = tokio::time::interval(Duration::from_millis(50));
         loop {
             tick.tick().await;
+            self.poll_auth().await;
             if self.playback == Playback::Playing && self.now_panel == NowPanel::Visualizer {
                 self.visualizer_phase += 0.04;
             }
@@ -462,6 +504,30 @@ impl App {
                 {
                     return Ok(());
                 }
+            }
+        }
+    }
+
+    async fn poll_auth(&mut self) {
+        if self
+            .auth_task
+            .as_ref()
+            .is_none_or(|task| !task.is_finished())
+        {
+            return;
+        }
+        let task = self.auth_task.take().expect("checked above");
+        match task.await {
+            Ok(Ok(account)) => self.status = format!("Signed in to YouTube Music as {account}"),
+            Ok(Err(error)) => {
+                self.status = format!(
+                    "YouTube Music sign-in is expired or invalid — run `dymus auth paste` with a fresh Cookie header ({error:#})"
+                )
+            }
+            Err(error) => {
+                self.status = format!(
+                    "Could not check YouTube Music sign-in — run `dymus auth status` ({error})"
+                )
             }
         }
     }
@@ -775,6 +841,30 @@ impl App {
         }
         if binding_matches(self.config.keybindings.get("volume_down"), key) {
             self.set_volume(self.volume.saturating_sub(5));
+            return false;
+        }
+        if key.code == KeyCode::Char('Z') && !self.radio_focused {
+            self.player.clear_preloaded();
+            let seed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |time| time.as_nanos() as u64);
+            self.queue.shuffle(seed);
+            self.preload_next();
+            self.status = "Shuffled upcoming tracks".into();
+            return false;
+        }
+        if key.code == KeyCode::Char('T') {
+            self.repeat_mode = self.repeat_mode.next();
+            self.player.command(json!([
+                "set_property",
+                "loop-file",
+                if self.repeat_mode == RepeatMode::Track {
+                    "inf"
+                } else {
+                    "no"
+                }
+            ]));
+            self.status = format!("Repeat: {}", self.repeat_mode.label());
             return false;
         }
         if self.radio_focused {
@@ -1734,6 +1824,7 @@ impl App {
         self.history_reported = false;
         self.lastfm_reported = false;
         self.lastfm_started_at = None;
+        self.repeat_history.clear();
         self.duration = 0.0;
         self.playback = Playback::Loading;
         self.audio_bands.clear();
@@ -1747,6 +1838,7 @@ impl App {
         self.player
             .play(self.generation, track.id.clone(), self.volume);
         self.queue.current = Some(track);
+        self.preload_next();
         if self.now_playing_view {
             self.request_cover();
             if self.now_panel == NowPanel::Lyrics {
@@ -1928,6 +2020,71 @@ impl App {
         }
     }
 
+    /// Advances only Dymus's queue after mpv has already moved onto its
+    /// preloaded playlist item. Starting another Player here would tear down
+    /// mpv and reintroduce the gap we just avoided.
+    fn advance_from_player(&mut self) {
+        self.queue_marks = self
+            .queue_marks
+            .iter()
+            .filter_map(|i| i.checked_sub(1))
+            .collect();
+        if self.repeat_mode == RepeatMode::Queue
+            && let Some(current) = self.queue.current.clone()
+        {
+            self.repeat_history.push(current);
+            if self.queue.upcoming.is_empty() {
+                self.queue
+                    .upcoming
+                    .extend(std::mem::take(&mut self.repeat_history));
+                if let Some(track) = self.queue.advance() {
+                    self.play(track);
+                    return;
+                }
+            }
+        }
+        if self.queue.advance().is_some() {
+            self.position = 0.0;
+            self.history_reported = false;
+            self.lastfm_reported = false;
+            self.lastfm_started_at = None;
+            self.duration = 0.0;
+            self.playback = Playback::Loading;
+            self.audio_bands.clear();
+            self.audio_waveform.clear();
+            self.audio_scope.clear();
+            self.audio_rms = 0.0;
+            self.audio_available = false;
+            self.audio_capture_error = None;
+            self.spectrogram_history.clear();
+            self.status.clear();
+            self.preload_next();
+            if self.now_playing_view {
+                self.request_cover();
+                if self.now_panel == NowPanel::Lyrics {
+                    self.request_lyrics();
+                }
+            }
+        } else {
+            self.player.stop();
+            self.playback = Playback::Idle;
+            self.position = 0.0;
+            self.duration = 0.0;
+            self.status.clear();
+            self.cover_art = None;
+            self.cover_loading = false;
+            if let Some(task) = self.cover_task.take() {
+                task.abort();
+            }
+        }
+    }
+
+    fn preload_next(&mut self) {
+        if let Some(track) = self.queue.upcoming.front() {
+            self.player.preload(self.generation, track.id.clone());
+        }
+    }
+
     fn on_player_event(&mut self, generation: u64, event: Event) {
         // A cancelled lookup or old mpv process must never advance the new queue.
         if generation != self.generation {
@@ -1982,11 +2139,19 @@ impl App {
                 };
             }
             Event::Paused(_) => {}
-            Event::Ended => self.next(),
+            Event::Ended => self.advance_from_player(),
             Event::Notice(message) => self.status = message,
             Event::Error(error) => {
                 self.playback = Playback::Failed;
-                self.status = format!("{error} · r to retry, n to skip");
+                let lower = error.to_ascii_lowercase();
+                self.status = if lower.contains("sign in to confirm")
+                    || lower.contains("not a bot")
+                    || lower.contains("authentication")
+                {
+                    "YouTube requires a fresh signed-in session — visit YouTube Music in your browser, then run `dymus auth paste` · r to retry, n to skip".into()
+                } else {
+                    format!("{error} · r to retry, n to skip")
+                };
             }
         }
     }
@@ -2162,6 +2327,16 @@ impl App {
     }
 
     pub async fn shutdown(&mut self) {
+        let mut saved_queue = Vec::new();
+        if matches!(
+            self.playback,
+            Playback::Playing | Playback::Paused | Playback::Loading
+        ) && let Some(current) = self.queue.current.clone()
+        {
+            saved_queue.push(current);
+        }
+        saved_queue.extend(self.queue.upcoming.iter().cloned());
+        cache::store_queue(&saved_queue);
         if let Some(task) = self.search_task.take() {
             task.abort();
             let _ = task.await;

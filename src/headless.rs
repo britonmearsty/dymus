@@ -706,9 +706,8 @@ fn paths() -> Result<(PathBuf, PathBuf)> {
 }
 
 async fn ensure_socket_is_available(path: &Path) -> Result<()> {
-    match UnixStream::connect(path).await {
-        Ok(_) => bail!("A headless Dymus player is already running; use `dymus control`"),
-        Err(_) => {}
+    if UnixStream::connect(path).await.is_ok() {
+        bail!("A headless Dymus player is already running; use `dymus control`");
     }
     if path.exists() {
         #[cfg(unix)]
@@ -766,7 +765,7 @@ async fn print_status(socket: &mut UnixStream, state_path: &Path) -> Result<()> 
     let position = command(socket, json!(["get_property", "time-pos"])).await?;
     let duration = command(socket, json!(["get_property", "duration"])).await?;
     let index = command(socket, json!(["get_property", "playlist-pos"])).await?;
-    let track = fs::read(&state_path)
+    let track = fs::read(state_path)
         .ok()
         .and_then(|body| serde_json::from_slice::<State>(&body).ok())
         .and_then(|state| {
