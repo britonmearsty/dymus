@@ -1,5 +1,7 @@
 # Dymus
 
+[![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Dymus is a keyboard-driven YouTube Music streaming TUI for Linux. It searches
 YouTube Music through InnerTube, resolves streams with yt-dlp, and controls mpv
 for audio playback. It uses the terminal's own background and defaults to the
@@ -313,6 +315,11 @@ yt-dlp installation. Dymus deliberately ignores user yt-dlp and mpv configuratio
 so unrelated player options cannot alter its behavior. If playback fails, run
 `dymus doctor`, update yt-dlp through your package manager, and try another
 track. Dymus targets Linux and uses Unix sockets for mpv IPC.
+
+## Contributing
+
+Bugs, feature ideas, and pull requests are welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for how to report issues and open PRs.
 
 ## Development
 
