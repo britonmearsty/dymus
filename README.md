@@ -50,6 +50,12 @@ To install a specific release, set its tag first:
 curl -fsSL https://raw.githubusercontent.com/britonmearsty/dymus/master/install.sh | DYMUS_VERSION=v0.1.0 sh
 ```
 
+Or install from [crates.io](https://crates.io/crates/dymus) with Cargo 1.88 or newer:
+
+```sh
+cargo install dymus
+```
+
 For a development build, install Rust 1.88 or newer and use:
 
 ```sh
