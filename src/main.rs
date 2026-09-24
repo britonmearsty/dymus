@@ -7,6 +7,7 @@ mod innertube;
 mod lastfm;
 mod lyrics;
 mod model;
+mod mpris;
 mod player;
 mod radio;
 mod ui;

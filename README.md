@@ -14,6 +14,8 @@ Tokyo Night palette.
 - World Radio via Radio Browser, with station, country, language, genre, and
   sorting filters.
 - Playback progress, seeking, volume, cover art, and automatic queue advancement.
+- MPRIS media integration so desktop shells and media keys can show the current
+  track and control playback.
 - A Now Playing view with queue, lyrics, and nine visualizer styles.
 - Plain and synced lyrics from LRCLIB.
 - Theme presets, color overrides, configurable startup view, and keybindings.
@@ -300,8 +302,9 @@ selected station.
 
 Search can load additional pages with `L`; use `f` to choose songs, artists,
 albums, or playlists, then Enter to open a collection. Generated radio loads
-one mix and does not continue endlessly. MPRIS and background playback are not
-included. Queue and search state stay in memory; exiting stops playback, though
+one mix and does not continue endlessly. Background playback is not included;
+while the TUI runs, MPRIS exposes it to desktop shells and media keys. Queue and
+search state stay in memory; exiting stops playback, though
 the upcoming queue is saved and restored on the next launch.
 Account-restricted tracks are not supported.
 

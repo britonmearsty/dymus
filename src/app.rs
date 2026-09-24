@@ -19,6 +19,7 @@ use crate::{
         SearchFilter, SearchPage, TrackPage,
     },
     model::{Queue, Track},
+    mpris::{self, Mpris, MprisCommand},
     player::{Event, Player},
     radio::{RadioBrowser, Station, StationFilter},
     ui,
@@ -220,12 +221,14 @@ pub struct App {
     history_reported: bool,
     repeat_mode: RepeatMode,
     repeat_history: Vec<Track>,
+    shuffle_enabled: bool,
     lastfm_reported: bool,
     lastfm_started_at: Option<u64>,
     pub duration: f64,
     pub volume: u8,
     api: InnerTube,
     player: Player,
+    mpris: Mpris,
     radio_api: RadioBrowser,
     generation: u64,
     search_task: Option<JoinHandle<Result<SearchPage>>>,
@@ -327,12 +330,14 @@ impl App {
             history_reported: false,
             repeat_mode: RepeatMode::Off,
             repeat_history: Vec::new(),
+            shuffle_enabled: false,
             lastfm_reported: false,
             lastfm_started_at: None,
             duration: 0.0,
             volume: 70,
             api,
             player: Player::new(),
+            mpris: Mpris::spawn(),
             radio_api: RadioBrowser::new()?,
             generation: 0,
             search_task: None,
@@ -430,6 +435,9 @@ impl App {
         loop {
             tick.tick().await;
             self.poll_auth().await;
+            if self.poll_mpris() {
+                return Ok(());
+            }
             if self.playback == Playback::Playing && self.now_panel == NowPanel::Visualizer {
                 self.visualizer_phase += 0.04;
             }
@@ -844,27 +852,11 @@ impl App {
             return false;
         }
         if key.code == KeyCode::Char('Z') && !self.radio_focused {
-            self.player.clear_preloaded();
-            let seed = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |time| time.as_nanos() as u64);
-            self.queue.shuffle(seed);
-            self.preload_next();
-            self.status = "Shuffled upcoming tracks".into();
+            self.set_shuffle(!self.shuffle_enabled);
             return false;
         }
         if key.code == KeyCode::Char('T') {
-            self.repeat_mode = self.repeat_mode.next();
-            self.player.command(json!([
-                "set_property",
-                "loop-file",
-                if self.repeat_mode == RepeatMode::Track {
-                    "inf"
-                } else {
-                    "no"
-                }
-            ]));
-            self.status = format!("Repeat: {}", self.repeat_mode.label());
+            self.set_repeat_mode(self.repeat_mode.next());
             return false;
         }
         if self.radio_focused {
@@ -1839,6 +1831,9 @@ impl App {
             .play(self.generation, track.id.clone(), self.volume);
         self.queue.current = Some(track);
         self.preload_next();
+        self.mpris_update_track();
+        self.mpris_update(mpris::Update::Status(mpris::PlaybackStatus::Playing));
+        self.mpris_can_go_next();
         if self.now_playing_view {
             self.request_cover();
             if self.now_panel == NowPanel::Lyrics {
@@ -2017,6 +2012,9 @@ impl App {
             if let Some(task) = self.cover_task.take() {
                 task.abort();
             }
+            self.mpris_update(mpris::Update::Status(mpris::PlaybackStatus::Stopped));
+            self.mpris_update(mpris::Update::Position { seconds: 0.0 });
+            self.mpris_can_go_next();
         }
     }
 
@@ -2059,6 +2057,8 @@ impl App {
             self.spectrogram_history.clear();
             self.status.clear();
             self.preload_next();
+            self.mpris_update_track();
+            self.mpris_can_go_next();
             if self.now_playing_view {
                 self.request_cover();
                 if self.now_panel == NowPanel::Lyrics {
@@ -2076,6 +2076,9 @@ impl App {
             if let Some(task) = self.cover_task.take() {
                 task.abort();
             }
+            self.mpris_update(mpris::Update::Status(mpris::PlaybackStatus::Stopped));
+            self.mpris_update(mpris::Update::Position { seconds: 0.0 });
+            self.mpris_can_go_next();
         }
     }
 
@@ -2083,6 +2086,174 @@ impl App {
         if let Some(track) = self.queue.upcoming.front() {
             self.player.preload(self.generation, track.id.clone());
         }
+    }
+
+    fn mpris_update(&self, update: mpris::Update) {
+        self.mpris.update(update);
+    }
+
+    fn mpris_playback_status(&self) -> mpris::PlaybackStatus {
+        match self.playback {
+            Playback::Idle | Playback::Failed => mpris::PlaybackStatus::Stopped,
+            Playback::Paused => mpris::PlaybackStatus::Paused,
+            Playback::Playing | Playback::Loading => mpris::PlaybackStatus::Playing,
+        }
+    }
+
+    fn mpris_update_track(&self) {
+        let Some(track) = self.queue.current.as_ref() else {
+            return;
+        };
+        self.mpris_update(mpris::Update::Track {
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: track.album.clone(),
+            video_id: (!track.id.starts_with("radio:")).then(|| track.id.clone()),
+            duration_secs: self
+                .duration
+                .max(crate::lastfm::duration_seconds(track) as f64),
+        });
+    }
+
+    fn mpris_can_go_next(&self) {
+        self.mpris_update(mpris::Update::CanGoNext(!self.queue.upcoming.is_empty()));
+    }
+
+    /// Handles MPRIS method calls from the bus, returning true to quit.
+    fn poll_mpris(&mut self) -> bool {
+        let mut quit = false;
+        for command in self.mpris.poll_commands() {
+            match command {
+                MprisCommand::Play => self.mpris_play(),
+                MprisCommand::PlayPause => self.mpris_play_pause(),
+                MprisCommand::Pause => self.mpris_pause(),
+                MprisCommand::Stop => self.stop(),
+                MprisCommand::Next => {
+                    self.cancel_radio();
+                    self.next();
+                }
+                MprisCommand::Previous => {
+                    // There is no track history, so Previous restarts the track.
+                    self.player.command(json!(["seek", 0.0, "absolute"]));
+                    self.mpris_update(mpris::Update::Seeked { seconds: 0.0 });
+                }
+                MprisCommand::Seek { offset_micros } => {
+                    self.player.command(json!([
+                        "seek",
+                        offset_micros as f64 / 1_000_000.0,
+                        "relative"
+                    ]));
+                }
+                MprisCommand::SetPosition { position_micros } => {
+                    let seconds = position_micros as f64 / 1_000_000.0;
+                    self.player.command(json!(["seek", seconds, "absolute"]));
+                    self.mpris_update(mpris::Update::Seeked { seconds });
+                }
+                MprisCommand::SetVolume { volume } => {
+                    let percentage = (volume.clamp(0.0, 1.0) * 100.0).round() as u8;
+                    self.set_volume(percentage);
+                }
+                MprisCommand::SetLoopStatus(status) => {
+                    self.set_repeat_mode(match status {
+                        mpris::LoopStatus::None => RepeatMode::Off,
+                        mpris::LoopStatus::Track => RepeatMode::Track,
+                        mpris::LoopStatus::Playlist => RepeatMode::Queue,
+                    });
+                }
+                MprisCommand::SetShuffle(on) => self.set_shuffle(on),
+                MprisCommand::Quit => quit = true,
+            }
+        }
+        quit
+    }
+
+    fn mpris_play(&mut self) {
+        match self.playback {
+            Playback::Playing | Playback::Loading => {}
+            Playback::Paused => {
+                self.player.command(json!(["set_property", "pause", false]));
+            }
+            Playback::Idle | Playback::Failed => {
+                if let Some(track) = self.queue.current.clone() {
+                    self.play(track);
+                }
+            }
+        }
+    }
+
+    fn mpris_pause(&mut self) {
+        if matches!(self.playback, Playback::Playing) {
+            self.player.command(json!(["set_property", "pause", true]));
+        }
+    }
+
+    fn mpris_play_pause(&mut self) {
+        match self.playback {
+            Playback::Playing | Playback::Paused => {
+                self.player.command(json!(["cycle", "pause"]));
+            }
+            Playback::Loading => {}
+            Playback::Idle | Playback::Failed => {
+                if let Some(track) = self.queue.current.clone() {
+                    self.play(track);
+                }
+            }
+        }
+    }
+
+    fn stop(&mut self) {
+        self.cancel_radio();
+        self.generation += 1;
+        self.player.stop();
+        self.playback = Playback::Idle;
+        self.position = 0.0;
+        self.duration = 0.0;
+        self.status.clear();
+        self.cover_art = None;
+        self.cover_loading = false;
+        if let Some(task) = self.cover_task.take() {
+            task.abort();
+        }
+        self.mpris_update(mpris::Update::Status(mpris::PlaybackStatus::Stopped));
+        self.mpris_update(mpris::Update::Position { seconds: 0.0 });
+        self.mpris_can_go_next();
+    }
+
+    fn set_repeat_mode(&mut self, mode: RepeatMode) {
+        self.repeat_mode = mode;
+        self.player.command(json!([
+            "set_property",
+            "loop-file",
+            if mode == RepeatMode::Track {
+                "inf"
+            } else {
+                "no"
+            }
+        ]));
+        self.status = format!("Repeat: {}", mode.label());
+        self.mpris_update(mpris::Update::LoopStatus(match mode {
+            RepeatMode::Off => mpris::LoopStatus::None,
+            RepeatMode::Track => mpris::LoopStatus::Track,
+            RepeatMode::Queue => mpris::LoopStatus::Playlist,
+        }));
+    }
+
+    fn set_shuffle(&mut self, on: bool) {
+        if on && !self.shuffle_enabled {
+            self.player.clear_preloaded();
+            let seed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |time| time.as_nanos() as u64);
+            self.queue.shuffle(seed);
+            self.preload_next();
+        }
+        self.shuffle_enabled = on;
+        self.status = if on {
+            "Shuffle: on".into()
+        } else {
+            "Shuffle: off".into()
+        };
+        self.mpris_update(mpris::Update::Shuffle(on));
     }
 
     fn on_player_event(&mut self, generation: u64, event: Event) {
@@ -2097,10 +2268,14 @@ impl App {
             }
             Event::Position(position) => {
                 self.position = position;
+                self.mpris_update(mpris::Update::Position { seconds: position });
                 self.maybe_report_history();
                 self.maybe_scrobble_lastfm();
             }
-            Event::Duration(duration) => self.duration = duration,
+            Event::Duration(duration) => {
+                self.duration = duration;
+                self.mpris_update(mpris::Update::Duration { seconds: duration });
+            }
             Event::AudioFrame(frame) => {
                 if self.audio_bands.len() == frame.bands.len() {
                     for (current, target) in self.audio_bands.iter_mut().zip(frame.bands) {
@@ -2137,12 +2312,14 @@ impl App {
                 } else {
                     Playback::Playing
                 };
+                self.mpris_update(mpris::Update::Status(self.mpris_playback_status()));
             }
             Event::Paused(_) => {}
             Event::Ended => self.advance_from_player(),
             Event::Notice(message) => self.status = message,
             Event::Error(error) => {
                 self.playback = Playback::Failed;
+                self.mpris_update(mpris::Update::Status(mpris::PlaybackStatus::Stopped));
                 let lower = error.to_ascii_lowercase();
                 self.status = if lower.contains("sign in to confirm")
                     || lower.contains("not a bot")
@@ -2251,6 +2428,9 @@ impl App {
         self.volume = volume;
         self.player
             .command(json!(["set_property", "volume", volume]));
+        self.mpris_update(mpris::Update::Volume {
+            ratio: volume as f64 / 100.0,
+        });
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -2363,6 +2543,7 @@ impl App {
             let _ = task.await;
         }
         self.player.shutdown().await;
+        self.mpris.shutdown();
     }
 }
 
