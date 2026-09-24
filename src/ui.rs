@@ -1,5 +1,5 @@
 use crate::{
-    app::{App, Playback, VisualizerMode},
+    app::{App, Playback, ToastKind, VisualizerMode},
     config::{Config, Palette},
     model::Track,
 };
@@ -10,7 +10,7 @@ use ratatui::{
     symbols::Marker,
     text::{Line, Span},
     widgets::{
-        Block, Cell, Paragraph, Row, Table, TableState, Wrap,
+        Block, Cell, Clear, Paragraph, Row, Table, TableState, Wrap,
         canvas::{Canvas, Circle, Line as CanvasLine, Points},
     },
 };
@@ -60,22 +60,26 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let (content, footer_area) = content_with_footer(inner);
         help(frame, app, content);
         footer(frame, app, footer_area);
+        toast(frame, app, inner);
         return;
     }
     if app.settings_view {
         let (content, footer_area) = content_with_footer(inner);
         settings(frame, app, content);
         footer(frame, app, footer_area);
+        toast(frame, app, inner);
         return;
     }
     if app.menu {
         let (content, footer_area) = content_with_footer(inner);
         actions(frame, app, content);
         footer(frame, app, footer_area);
+        toast(frame, app, inner);
         return;
     }
     if app.now_playing_view {
         playing_view(frame, app, inner);
+        toast(frame, app, inner);
         return;
     }
     let playing = app.queue.current.is_some();
@@ -91,7 +95,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Length(u16::from(show_search)),
         Constraint::Length(u16::from(show_search)),
         Constraint::Min(1),
-        Constraint::Length(if app.status.is_empty() { 0 } else { 2 }),
         Constraint::Length(u16::from(playing)), // Whitespace separates transport.
         Constraint::Length(if playing { 2 } else { 0 }),
         Constraint::Length(1), // Keep content and footer visually separated.
@@ -149,7 +152,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else if app.results.is_empty() {
         let message = if app.searching {
             "Searching…"
-        } else if app.query.is_empty() || !app.status.is_empty() {
+        } else if app.query.is_empty() || app.toast.is_some() {
             ""
         } else {
             "No results found"
@@ -168,18 +171,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             rows[4],
         );
     }
-    if !app.status.is_empty() {
-        frame.render_widget(
-            Paragraph::new(app.status.as_str())
-                .style(Style::default().fg(error_color()))
-                .wrap(Wrap { trim: true }),
-            rows[5],
-        );
-    }
     if playing {
-        now_playing(frame, app, rows[7]);
+        now_playing(frame, app, rows[6]);
     }
-    footer(frame, app, rows[9]);
+    footer(frame, app, rows[8]);
+    toast(frame, app, rows[7]);
 }
 
 fn search_collections(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -595,6 +591,30 @@ fn footer(frame: &mut Frame, app: &App, area: Rect) {
         used += separator + hint_width;
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// A small non-blocking notice anchored to the bottom right that disappears on
+/// its own. Rendered last so it floats above any view. One clipped line, so it
+/// never pushes or jumbles the transport or footer.
+fn toast(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(toast) = &app.toast else {
+        return;
+    };
+    let width = (area.width / 2).clamp(24, 72);
+    let rect = Rect {
+        x: area.right().saturating_sub(width).max(area.left()),
+        y: area.bottom().saturating_sub(1),
+        width,
+        height: 1,
+    };
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(toast.message.as_str()).style(Style::default().fg(match toast.kind {
+            ToastKind::Info => secondary_color(),
+            ToastKind::Error => error_color(),
+        })),
+        rect,
+    );
 }
 
 fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -1206,7 +1226,7 @@ fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     if app.discovery_items.is_empty() {
-        let message = if app.status.is_empty() {
+        let message = if app.toast.is_none() {
             "No suggestions available"
         } else {
             ""
@@ -1303,7 +1323,7 @@ fn library(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     if app.library_items.is_empty() {
-        let message = if app.status.is_empty() {
+        let message = if app.toast.is_none() {
             format!("No {label}")
         } else {
             "".into()
@@ -1382,7 +1402,7 @@ fn radio_view(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     if app.radio_stations.is_empty() {
-        let message = if app.status.is_empty() {
+        let message = if app.toast.is_none() {
             "No stations matched these filters"
         } else {
             ""

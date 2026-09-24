@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeSet, VecDeque},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
@@ -63,6 +63,22 @@ pub enum NowPanel {
     Queue,
     Visualizer,
     Lyrics,
+}
+
+/// How a toast should be styled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToastKind {
+    Info,
+    Error,
+}
+
+/// A transient bottom-right notice that fades out on its own.
+#[derive(Clone, Debug)]
+pub struct Toast {
+    pub message: String,
+    pub kind: ToastKind,
+    shown_at: Instant,
+    duration: Duration,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -214,7 +230,7 @@ pub struct App {
     pub menu_state: TableState,
     pub result_marks: BTreeSet<usize>,
     pub queue_marks: BTreeSet<usize>,
-    pub status: String,
+    pub toast: Option<Toast>,
     pub searching: bool,
     pub playback: Playback,
     pub position: f64,
@@ -323,7 +339,7 @@ impl App {
             menu_state: TableState::default(),
             result_marks: BTreeSet::new(),
             queue_marks: BTreeSet::new(),
-            status: String::new(),
+            toast: None,
             searching: false,
             playback: Playback::Idle,
             position: 0.0,
@@ -359,7 +375,10 @@ impl App {
 
     pub fn start(&mut self) {
         if self.auth_task.is_none() {
-            self.status = "Not signed in — public music works; run `dymus auth paste` for library and restricted playback".into();
+            self.notice(
+                "Not signed in — public music works; `dymus auth paste` unlocks your library",
+                ToastKind::Info,
+            );
         }
         self.editing = self.config.start_view == "search";
         match self.config.start_view.as_str() {
@@ -434,6 +453,7 @@ impl App {
         let mut tick = tokio::time::interval(Duration::from_millis(50));
         loop {
             tick.tick().await;
+            self.expire_toast();
             self.poll_auth().await;
             if self.poll_mpris() {
                 return Ok(());
@@ -450,7 +470,7 @@ impl App {
                 self.searching = false;
                 match result {
                     Ok(Ok(page)) => {
-                        self.status.clear();
+                        self.clear_toast();
                         if self.search_appending {
                             if self.search_filter == SearchFilter::Songs {
                                 let mut ids = self
@@ -489,8 +509,12 @@ impl App {
                         self.results_state
                             .select(if count == 0 { None } else { Some(0) });
                     }
-                    Ok(Err(error)) => self.status = format!("Search failed: {error:#}"),
-                    Err(error) => self.status = format!("Search task failed: {error}"),
+                    Ok(Err(error)) => {
+                        self.notice(format!("Search failed: {error:#}"), ToastKind::Error)
+                    }
+                    Err(error) => {
+                        self.notice(format!("Search task failed: {error}"), ToastKind::Error)
+                    }
                 }
             }
             self.poll_radio().await;
@@ -526,17 +550,19 @@ impl App {
         }
         let task = self.auth_task.take().expect("checked above");
         match task.await {
-            Ok(Ok(account)) => self.status = format!("Signed in to YouTube Music as {account}"),
-            Ok(Err(error)) => {
-                self.status = format!(
-                    "YouTube Music sign-in is expired or invalid — run `dymus auth paste` with a fresh Cookie header ({error:#})"
-                )
+            Ok(Ok(account)) => {
+                self.notice(format!("Signed in to YouTube Music as {account}"), ToastKind::Info)
             }
-            Err(error) => {
-                self.status = format!(
-                    "Could not check YouTube Music sign-in — run `dymus auth status` ({error})"
-                )
-            }
+            Ok(Err(error)) => self.notice(
+                format!(
+                    "YouTube Music sign-in is expired or invalid — `dymus auth paste` with a fresh Cookie header ({error:#})"
+                ),
+                ToastKind::Error,
+            ),
+            Err(error) => self.notice(
+                format!("Could not check YouTube Music sign-in — `dymus auth status` ({error})"),
+                ToastKind::Error,
+            ),
         }
     }
 
@@ -593,7 +619,10 @@ impl App {
                         self.config.start_view = config::START_VIEWS[next].into();
                     }
                     if let Err(error) = self.config.save() {
-                        self.status = format!("Could not save settings: {error:#}");
+                        self.notice(
+                            format!("Could not save settings: {error:#}"),
+                            ToastKind::Error,
+                        );
                     }
                 }
                 _ => {}
@@ -861,7 +890,7 @@ impl App {
         }
         if self.radio_focused {
             match key.code {
-                KeyCode::Esc => self.status.clear(),
+                KeyCode::Esc => self.clear_toast(),
                 KeyCode::Char('/') => self.edit_radio_filter(0),
                 KeyCode::Char('c') => self.edit_radio_filter(1),
                 KeyCode::Char('l') => self.edit_radio_filter(2),
@@ -916,18 +945,18 @@ impl App {
                     }
                     self.library_detail = false;
                     self.results.clear();
-                    self.status.clear();
+                    self.clear_toast();
                     return false;
                 }
                 if (self.home_focused || self.explore_focused) && self.content_detail {
                     self.content_detail = false;
                     self.results.clear();
-                    self.status.clear();
+                    self.clear_toast();
                     return false;
                 }
                 self.marks_mut().clear();
                 self.cancel_radio();
-                self.status.clear();
+                self.clear_toast();
             }
             KeyCode::Char('?') => {
                 self.help = true;
@@ -995,7 +1024,10 @@ impl App {
             {
                 self.search_filter = self.search_filter.next();
                 if self.query.is_empty() {
-                    self.status = format!("Search filter: {}", self.search_filter.label());
+                    self.notice(
+                        format!("Search filter: {}", self.search_filter.label()),
+                        ToastKind::Info,
+                    );
                 } else {
                     self.input = self.query.clone();
                     self.search();
@@ -1293,7 +1325,7 @@ impl App {
 
     fn start_radio(&mut self, seed: Track) {
         self.cancel_radio();
-        self.status.clear();
+        self.clear_toast();
         let api = self.api.clone();
         self.radio_task = Some(tokio::spawn(async move {
             let tracks = api.radio(&seed.id).await?;
@@ -1327,8 +1359,8 @@ impl App {
         {
             match self.radio_task.take().unwrap().await {
                 Ok(Ok(tracks)) => self.replace_and_play(tracks),
-                Ok(Err(error)) => self.status = format!("Radio failed: {error:#}"),
-                Err(error) => self.status = format!("Radio task failed: {error}"),
+                Ok(Err(error)) => self.notice(format!("Radio failed: {error:#}"), ToastKind::Error),
+                Err(error) => self.notice(format!("Radio task failed: {error}"), ToastKind::Error),
             }
         }
     }
@@ -1343,7 +1375,7 @@ impl App {
         self.library_detail = false;
         self.content_detail = false;
         self.queue_focused = false;
-        self.status.clear();
+        self.clear_toast();
         if self.radio_stations.is_empty() && !self.radio_loading {
             self.refresh_stations();
         }
@@ -1356,7 +1388,7 @@ impl App {
         let api = self.radio_api.clone();
         let filter = self.radio_filter.clone();
         self.radio_loading = true;
-        self.status.clear();
+        self.clear_toast();
         self.stations_task = Some(tokio::spawn(async move { api.search(&filter).await }));
     }
 
@@ -1409,10 +1441,14 @@ impl App {
                     self.radio_stations = stations;
                     self.radio_state
                         .select((!self.radio_stations.is_empty()).then_some(0));
-                    self.status.clear();
+                    self.clear_toast();
                 }
-                Ok(Err(error)) => self.status = format!("Radio search failed: {error:#}"),
-                Err(error) => self.status = format!("Radio search failed: {error}"),
+                Ok(Err(error)) => {
+                    self.notice(format!("Radio search failed: {error:#}"), ToastKind::Error)
+                }
+                Err(error) => {
+                    self.notice(format!("Radio search failed: {error}"), ToastKind::Error)
+                }
             }
         }
     }
@@ -1427,7 +1463,7 @@ impl App {
             return;
         };
         if station.url_resolved.trim().is_empty() {
-            self.status = "This station has no playable stream URL".into();
+            self.notice("This station has no playable stream URL", ToastKind::Error);
             return;
         }
         let api = self.radio_api.clone();
@@ -1474,7 +1510,7 @@ impl App {
         self.search_appending = false;
         self.result_marks.clear();
         self.results_state.select(None);
-        self.status.clear();
+        self.clear_toast();
         let api = self.api.clone();
         let filter = self.search_filter;
         self.search_task = Some(tokio::spawn(
@@ -1484,7 +1520,7 @@ impl App {
 
     fn load_more_search(&mut self) {
         let Some(token) = self.search_continuation.clone() else {
-            self.status = "No more search results".into();
+            self.notice("No more search results", ToastKind::Info);
             return;
         };
         if let Some(task) = self.search_task.take() {
@@ -1543,7 +1579,7 @@ impl App {
         self.library_continuation = None;
         self.library_state.select(None);
         self.library_loading = true;
-        self.status.clear();
+        self.clear_toast();
         self.result_marks.clear();
         let api = self.api.clone();
         self.library_appending = false;
@@ -1552,7 +1588,7 @@ impl App {
 
     fn load_more_library(&mut self) {
         let Some(token) = self.library_continuation.clone() else {
-            self.status = "No more items in this collection".into();
+            self.notice("No more items in this collection", ToastKind::Info);
             return;
         };
         if let Some(task) = self.library_task.take() {
@@ -1577,14 +1613,14 @@ impl App {
         self.search_detail = false;
         self.library_detail_continuation = None;
         self.detail_appending = false;
-        self.status.clear();
+        self.clear_toast();
         let api = self.api.clone();
         self.detail_task = Some(tokio::spawn(async move { api.library_tracks(&item).await }));
     }
 
     fn load_more_library_tracks(&mut self) {
         let Some(token) = self.library_detail_continuation.clone() else {
-            self.status = "No more tracks in this collection".into();
+            self.notice("No more tracks in this collection", ToastKind::Info);
             return;
         };
         if let Some(task) = self.detail_task.take() {
@@ -1627,7 +1663,7 @@ impl App {
         }
         self.discovery_loading = true;
         self.result_marks.clear();
-        self.status.clear();
+        self.clear_toast();
         let api = self.api.clone();
         self.discovery_appending = false;
         self.discovery_append_section = None;
@@ -1653,7 +1689,7 @@ impl App {
             .find(|continuation| continuation.section == section)
             .cloned()
         else {
-            self.status = format!("No more items in {section}");
+            self.notice(format!("No more items in {section}"), ToastKind::Info);
             return;
         };
         if let Some(task) = self.discovery_task.take() {
@@ -1686,7 +1722,7 @@ impl App {
             return;
         }
         self.library_loading = true;
-        self.status.clear();
+        self.clear_toast();
         let api = self.api.clone();
         self.detail_task = Some(tokio::spawn(async move { api.library_tracks(&item).await }));
     }
@@ -1733,8 +1769,8 @@ impl App {
                     self.discovery_state
                         .select((!self.discovery_items.is_empty()).then_some(0));
                 }
-                Ok(Err(e)) => self.status = format!("Could not load view: {e:#}"),
-                Err(e) => self.status = format!("View task failed: {e}"),
+                Ok(Err(e)) => self.notice(format!("Could not load view: {e:#}"), ToastKind::Error),
+                Err(e) => self.notice(format!("View task failed: {e}"), ToastKind::Error),
             }
         }
     }
@@ -1767,8 +1803,8 @@ impl App {
                     self.library_state
                         .select((!self.library_items.is_empty()).then_some(0));
                 }
-                Ok(Err(e)) => self.status = format!("Library failed: {e:#}"),
-                Err(e) => self.status = format!("Library task failed: {e}"),
+                Ok(Err(e)) => self.notice(format!("Library failed: {e:#}"), ToastKind::Error),
+                Err(e) => self.notice(format!("Library task failed: {e}"), ToastKind::Error),
             }
         }
         if self
@@ -1804,8 +1840,8 @@ impl App {
                         self.library_detail = true;
                     }
                 }
-                Ok(Err(e)) => self.status = format!("Could not open item: {e:#}"),
-                Err(e) => self.status = format!("Library task failed: {e}"),
+                Ok(Err(e)) => self.notice(format!("Could not open item: {e:#}"), ToastKind::Error),
+                Err(e) => self.notice(format!("Library task failed: {e}"), ToastKind::Error),
             }
         }
     }
@@ -1826,7 +1862,7 @@ impl App {
         self.audio_available = false;
         self.audio_capture_error = None;
         self.spectrogram_history.clear();
-        self.status.clear();
+        self.clear_toast();
         self.player
             .play(self.generation, track.id.clone(), self.volume);
         self.queue.current = Some(track);
@@ -2006,7 +2042,7 @@ impl App {
             self.playback = Playback::Idle;
             self.position = 0.0;
             self.duration = 0.0;
-            self.status.clear();
+            self.clear_toast();
             self.cover_art = None;
             self.cover_loading = false;
             if let Some(task) = self.cover_task.take() {
@@ -2055,7 +2091,7 @@ impl App {
             self.audio_available = false;
             self.audio_capture_error = None;
             self.spectrogram_history.clear();
-            self.status.clear();
+            self.clear_toast();
             self.preload_next();
             self.mpris_update_track();
             self.mpris_can_go_next();
@@ -2070,7 +2106,7 @@ impl App {
             self.playback = Playback::Idle;
             self.position = 0.0;
             self.duration = 0.0;
-            self.status.clear();
+            self.clear_toast();
             self.cover_art = None;
             self.cover_loading = false;
             if let Some(task) = self.cover_task.take() {
@@ -2085,6 +2121,28 @@ impl App {
     fn preload_next(&mut self) {
         if let Some(track) = self.queue.upcoming.front() {
             self.player.preload(self.generation, track.id.clone());
+        }
+    }
+
+    fn notice(&mut self, message: impl Into<String>, kind: ToastKind) {
+        let message = message.into();
+        self.toast = Some(Toast {
+            message,
+            kind,
+            shown_at: Instant::now(),
+            duration: Duration::from_millis(if kind == ToastKind::Error { 8000 } else { 6000 }),
+        });
+    }
+
+    fn clear_toast(&mut self) {
+        self.toast = None;
+    }
+
+    fn expire_toast(&mut self) {
+        if let Some(toast) = &self.toast
+            && toast.shown_at.elapsed() > toast.duration
+        {
+            self.toast = None;
         }
     }
 
@@ -2208,7 +2266,7 @@ impl App {
         self.playback = Playback::Idle;
         self.position = 0.0;
         self.duration = 0.0;
-        self.status.clear();
+        self.clear_toast();
         self.cover_art = None;
         self.cover_loading = false;
         if let Some(task) = self.cover_task.take() {
@@ -2230,7 +2288,7 @@ impl App {
                 "no"
             }
         ]));
-        self.status = format!("Repeat: {}", mode.label());
+        self.notice(format!("Repeat: {}", mode.label()), ToastKind::Info);
         self.mpris_update(mpris::Update::LoopStatus(match mode {
             RepeatMode::Off => mpris::LoopStatus::None,
             RepeatMode::Track => mpris::LoopStatus::Track,
@@ -2248,11 +2306,10 @@ impl App {
             self.preload_next();
         }
         self.shuffle_enabled = on;
-        self.status = if on {
-            "Shuffle: on".into()
-        } else {
-            "Shuffle: off".into()
-        };
+        self.notice(
+            if on { "Shuffle: on" } else { "Shuffle: off" },
+            ToastKind::Info,
+        );
         self.mpris_update(mpris::Update::Shuffle(on));
     }
 
@@ -2316,19 +2373,22 @@ impl App {
             }
             Event::Paused(_) => {}
             Event::Ended => self.advance_from_player(),
-            Event::Notice(message) => self.status = message,
+            Event::Notice(message) => self.notice(message, ToastKind::Info),
             Event::Error(error) => {
                 self.playback = Playback::Failed;
                 self.mpris_update(mpris::Update::Status(mpris::PlaybackStatus::Stopped));
                 let lower = error.to_ascii_lowercase();
-                self.status = if lower.contains("sign in to confirm")
-                    || lower.contains("not a bot")
-                    || lower.contains("authentication")
-                {
-                    "YouTube requires a fresh signed-in session — visit YouTube Music in your browser, then run `dymus auth paste` · r to retry, n to skip".into()
-                } else {
-                    format!("{error} · r to retry, n to skip")
-                };
+                self.notice(
+                    if lower.contains("sign in to confirm")
+                        || lower.contains("not a bot")
+                        || lower.contains("authentication")
+                    {
+                        "YouTube requires a fresh signed-in session — visit YouTube Music in your browser, then run `dymus auth paste` · r to retry, n to skip".into()
+                    } else {
+                        format!("{error} · r to retry, n to skip")
+                    },
+                    ToastKind::Error,
+                );
             }
         }
     }
@@ -2938,7 +2998,11 @@ mod tests {
         tokio::task::yield_now().await;
         app.poll_radio().await;
         assert!(!app.radio_loading());
-        assert!(app.status.contains("network unavailable"));
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|toast| toast.message.contains("network unavailable"))
+        );
         assert_eq!(app.queue.current, Some(track("playing")));
         assert_eq!(app.queue.upcoming, [track("old")]);
         assert_eq!(app.playback, Playback::Playing);
