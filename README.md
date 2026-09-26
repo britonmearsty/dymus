@@ -7,6 +7,27 @@ YouTube Music through InnerTube, resolves streams with yt-dlp, and controls mpv
 for audio playback. It uses the terminal's own background and defaults to the
 Tokyo Night palette.
 
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%" valign="top"><img src="screenshots/home.png" alt="Home view"><br><sub><b>Home</b> — signed-in recommendations and shelves</sub></td>
+    <td width="50%" valign="top"><img src="screenshots/explore.png" alt="Explore view"><br><sub><b>Explore</b> — browseable collections; Enter opens a shelf</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><img src="screenshots/library-playlist.png" alt="Playlists view"><br><sub><b>Playlists</b> — your signed-in library</sub></td>
+    <td width="50%" valign="top"><img src="screenshots/library-artists-albums.png" alt="Artists and Albums views"><br><sub><b>Artists and Albums</b> — signed-in library views</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><img src="screenshots/online-radio.png" alt="World Radio view"><br><sub><b>World Radio</b> — Radio Browser stations with filters</sub></td>
+    <td width="50%" valign="top"><img src="screenshots/queue.png" alt="Queue view"><br><sub><b>Queue</b> — upcoming playback, reordered with J / K</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><img src="screenshots/now-playing.png" alt="Now Playing view"><br><sub><b>Now Playing</b> — cover art, progress, and queue</sub></td>
+    <td width="50%" valign="top"><img src="screenshots/visualizer.png" alt="Visualizer panel"><br><sub><b>Visualizer</b> — nine styles, audio-reactive through PipeWire</sub></td>
+  </tr>
+</table>
+
 ## Features
 
 - Home and Explore feeds, public search, and a separate playback queue.
