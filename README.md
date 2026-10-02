@@ -69,7 +69,7 @@ dymus
 To install a specific release, set its tag first:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/britonmearsty/dymus/master/install.sh | DYMUS_VERSION=v0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/britonmearsty/dymus/master/install.sh | DYMUS_VERSION=v0.3.0 sh
 ```
 
 Or install from [crates.io](https://crates.io/crates/dymus) with Cargo 1.88 or newer:
