@@ -42,7 +42,8 @@ playback, downloads, and transport controls without opening the TUI.
 .PP
 Public search and local playback do not require a YouTube account.
 Signed-in library access uses browser-session credentials configured with
-.BR "dymus auth paste" .
+.BR "dymus auth paste" or
+.BR "dymus auth browser" .
 .SH GENERAL OPTIONS
 .TP
 .B \-h, \-\-help
@@ -121,6 +122,18 @@ and
 .BI "auth " action
 .B paste
 privately accepts and validates a YouTube Music Cookie header.
+.B browser
+imports YouTube Music cookies from a yt-dlp-supported browser, then validates the session.
+.BI "\-\-browser " name
+selects brave, chrome, chromium, edge, firefox, opera, safari, vivaldi, or whale
+(default firefox; availability depends on the installed yt-dlp version).
+.BI "\-\-profile " profile
+selects a browser profile name or path; by default yt-dlp chooses the active profile.
+.BI "\-\-container " name
+selects a Firefox Multi-Account Container (Firefox only).
+.BI "\-\-keyring " name
+selects the Chromium cookie keyring on Linux: basictext, gnomekeyring, kwallet,
+kwallet5, or kwallet6.
 .BI "\-\-auth-user " index
 selects the account index (default 0).
 .B status

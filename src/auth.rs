@@ -309,6 +309,150 @@ pub fn validate_input() -> Result<()> {
     Ok(())
 }
 
+/// Import only cookies applicable to YouTube Music from a yt-dlp browser export.
+pub async fn from_browser(
+    browser: &str,
+    profile: Option<&str>,
+    container: Option<&str>,
+    keyring: Option<&str>,
+    auth_user: &str,
+) -> Result<BrowserAuth> {
+    const BROWSERS: &[&str] = &[
+        "brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi", "whale",
+    ];
+    ensure!(BROWSERS.contains(&browser), "Unsupported browser name");
+    ensure!(
+        auth_user.bytes().all(|byte| byte.is_ascii_digit()),
+        "Account index must contain only digits"
+    );
+    ensure!(
+        container.is_none() || browser == "firefox",
+        "Firefox containers can only be used with --browser firefox"
+    );
+    if let Some(profile) = profile {
+        ensure!(
+            !profile.contains(':') && !profile.is_empty(),
+            "Browser profile cannot be empty or contain ':'"
+        );
+    }
+    if let Some(container) = container {
+        ensure!(
+            !container.contains(':') && !container.is_empty(),
+            "Firefox container cannot be empty or contain ':'"
+        );
+    }
+    if let Some(keyring) = keyring {
+        ensure!(
+            [
+                "basictext",
+                "gnomekeyring",
+                "kwallet",
+                "kwallet5",
+                "kwallet6"
+            ]
+            .contains(&keyring),
+            "Unsupported yt-dlp keyring"
+        );
+    }
+    let mut source = String::from(browser);
+    if let Some(keyring) = keyring {
+        source.push('+');
+        source.push_str(keyring);
+    }
+    if let Some(profile) = profile {
+        source.push(':');
+        source.push_str(profile);
+    }
+    if let Some(container) = container {
+        source.push_str("::");
+        source.push_str(container);
+    }
+
+    let directory =
+        tempfile::tempdir().context("Cannot create a private temporary cookie directory")?;
+    let cookie_file = directory.path().join("cookies.txt");
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        tokio::process::Command::new("yt-dlp")
+            .args(["--ignore-config", "--no-warnings", "--cookies-from-browser"])
+            .arg(source)
+            .arg("--cookies")
+            .arg(&cookie_file)
+            .arg("--skip-download")
+            .arg("--simulate")
+            .arg("https://music.youtube.com/")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("Timed out reading browser cookies; close the browser and try again")?
+    .context("Cannot start yt-dlp; install yt-dlp to import browser authentication")?;
+    ensure!(
+        output.status.success(),
+        "yt-dlp could not read browser cookies; close the browser, check the profile and keyring, and try again"
+    );
+    let jar = fs::read_to_string(&cookie_file)
+        .context("yt-dlp did not create a browser cookie export")?;
+    let cookie = youtube_cookie_header(&jar)?;
+    BrowserAuth::from_cookie(cookie, auth_user)
+}
+
+fn youtube_cookie_header(jar: &str) -> Result<String> {
+    let mut cookies = Vec::<(String, String)>::new();
+    let now = unix_timestamp()?;
+    let mut has_header = false;
+    for line in jar.lines() {
+        if line.starts_with('#') && !line.starts_with("#HttpOnly_") {
+            if line.contains("Netscape HTTP Cookie File") || line.contains("Netscape cookie file") {
+                has_header = true;
+            }
+            continue;
+        }
+        let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
+        let fields: Vec<_> = line.split('\t').collect();
+        if fields.len() != 7 {
+            continue;
+        }
+        let domain = fields[0].trim_start_matches('.').to_ascii_lowercase();
+        let include_subdomains = fields[1] == "TRUE";
+        let path = fields[2];
+        let secure = fields[3] == "TRUE";
+        let expiry = fields[4].parse::<u64>().unwrap_or(0);
+        let name = fields[5];
+        let value = fields[6];
+        let host_matches = "music.youtube.com" == domain
+            || (include_subdomains && "music.youtube.com".ends_with(&format!(".{domain}")));
+        let path_matches = path.starts_with('/') && "/".starts_with(path);
+        if host_matches
+            && path_matches
+            && secure
+            && (expiry == 0 || expiry > now)
+            && !name.is_empty()
+            && !name.contains([';', '='])
+            && !value.contains([';', '\r', '\n'])
+        {
+            if let Some(existing) = cookies.iter_mut().find(|(existing, _)| existing == name) {
+                existing.1 = value.to_owned();
+            } else {
+                cookies.push((name.to_owned(), value.to_owned()));
+            }
+        }
+    }
+    ensure!(
+        has_header,
+        "yt-dlp returned an invalid browser cookie export"
+    );
+    ensure!(
+        !cookies.is_empty(),
+        "No valid YouTube Music cookies were found in the selected browser"
+    );
+    Ok(cookies
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("; "))
+}
+
 pub fn unix_timestamp() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
@@ -344,5 +488,65 @@ mod tests {
         let auth = BrowserAuth::from_cookie("YSC=abc; __Secure-3PAPISID=def".into(), "2").unwrap();
         assert_eq!(auth.cookie(), "YSC=abc; __Secure-3PAPISID=def");
         assert_eq!(auth.auth_user(), "2");
+    }
+
+    #[test]
+    fn browser_export_keeps_only_secure_unexpired_youtube_cookies() {
+        let now = unix_timestamp().unwrap();
+        let jar = format!(
+            "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tmain\n#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-3PAPISID\tsecret\n.other.test\tTRUE\t/\tTRUE\t0\tLEAK\tno\n.youtube.com\tFALSE\t/\tFALSE\t0\tINSECURE\tno\n.youtube.com\tTRUE\t/\tTRUE\t{}\tEXPIRED\tno\n",
+            now - 1
+        );
+        let header = youtube_cookie_header(&jar).unwrap();
+        assert!(header.contains("SID=main"));
+        assert!(header.contains("__Secure-3PAPISID=secret"));
+        assert!(!header.contains("LEAK"));
+        assert!(!header.contains("INSECURE"));
+        assert!(!header.contains("EXPIRED"));
+        assert!(BrowserAuth::from_cookie(header, "0").is_ok());
+    }
+
+    #[test]
+    fn browser_source_options_are_validated_before_launch() {
+        assert!(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(from_browser(
+                    "firefox",
+                    Some("bad:profile"),
+                    None,
+                    None,
+                    "0"
+                ))
+                .is_err()
+        );
+        assert!(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(from_browser(
+                    "firefox",
+                    None,
+                    Some("bad:container"),
+                    None,
+                    "0"
+                ))
+                .is_err()
+        );
+        assert!(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(from_browser("chrome", None, Some("Music"), None, "0"))
+                .is_err()
+        );
+        assert!(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(from_browser("chrome", None, None, Some("unknown"), "0"))
+                .is_err()
+        );
     }
 }
