@@ -1,0 +1,323 @@
+.TH DYMUS 1 "" "Dymus @VERSION@" "User Commands"
+.SH NAME
+dymus \- keyboard-driven music player with terminal and headless interfaces
+.SH SYNOPSIS
+.B dymus
+.br
+.B dymus search
+.I query
+.RI [ options ]
+.br
+.B dymus play
+.I target
+.RI [ query ]
+.RI [ options ]
+.br
+.B dymus download
+.I target query
+.RI [ options ]
+.br
+.B dymus local
+.RI [ query ]
+.RI [ options ]
+.br
+.B dymus control
+.I action
+.br
+.B dymus auth
+.I action
+.br
+.B dymus lastfm
+.I action
+.br
+.B dymus doctor
+.br
+.B dymus man
+.RI [ options ]
+.SH DESCRIPTION
+Dymus plays YouTube Music, YouTube video, and local media using mpv.
+With no command, it opens the keyboard-driven terminal interface (TUI).
+Headless commands provide interactive selection, inline progress, detached
+playback, downloads, and transport controls without opening the TUI.
+.PP
+Public search and local playback do not require a YouTube account.
+Signed-in library access uses browser-session credentials configured with
+.BR "dymus auth paste" .
+.SH COMMANDS
+.TP
+.BI "search " query
+Search all YouTube, select a result, and choose audio or video playback.
+.B \-\-json
+prints results without prompting or playing.
+.BI "\-\-limit " number
+sets the result count (1 to 50).
+.B \-\-video
+selects video without the mode prompt.
+.B \-\-detach
+returns to the shell while playback continues.
+.BI "\-\-volume " number
+sets initial volume (0 to 100; default 80).
+.TP
+.BI "play song|album|playlist " query
+Find and play a song or a complete collection.
+.TP
+.BI "play library " category
+Choose a signed-in library item.
+Categories are
+.BR playlists ,
+.BR albums ,
+.BR artists ,
+and
+.BR podcasts .
+.TP
+.BR "play local " [ query ]
+Browse downloaded and imported local collections, or play a file, directory,
+or UTF-8 M3U/M3U8 playlist.
+.BI "\-\-path " path
+reads a specific location.
+.BI "\-\-id " id
+selects an entire collection by the ID from
+.BR "dymus local \-\-json" .
+.B \-\-all
+queues all tracks in matching collections without prompting.
+.TP
+.BI "download song|video|album|playlist " query_or_URL
+Download audio or video using yt-dlp and ffmpeg.
+The video target selects video automatically.
+.B \-\-video
+selects video for any target.
+.BI "\-\-path " directory
+overrides the configured destination.
+Completed files, collection metadata, and relative M3U8 playlists are kept
+if a download is interrupted; rerun the command to resume.
+.TP
+.BR "local " [ query ]
+List local collections and tracks.
+.B \-\-json
+prints structured metadata and collection IDs.
+.BI "\-\-path " path
+reads a specific file, directory, or playlist.
+.TP
+.BI "control " action
+Control the running headless player. Actions are
+.BR status ,
+.BR pause ,
+.BR resume ,
+.BR toggle ,
+.BR next ,
+.BR previous ,
+.BR stop ,
+and
+.BI "volume " number
+(0 to 100).
+.TP
+.BI "auth " action
+.B paste
+privately accepts and validates a YouTube Music Cookie header.
+.BI "\-\-auth-user " index
+selects the account index (default 0).
+.B status
+validates the saved session;
+.B logout
+removes it.
+.TP
+.BI "lastfm " action
+.B login
+authorizes a Last.fm session through a browser;
+.B paste
+privately accepts existing API and session credentials;
+.B status
+checks the connection;
+.B logout
+removes Last.fm credentials.
+.TP
+.B doctor
+Check playback, download, and optional visualizer dependencies.
+.TP
+.B man
+Write this manual in roff format to standard output.
+.B \-\-install
+installs it to the user's man directory.
+.BI "\-\-directory " directory
+selects a different man root, with the page stored under
+.BR man1/dymus.1 .
+This option requires
+.BR \-\-install .
+.SH PLAYBACK OPTIONS
+All
+.B play
+targets accept:
+.TP
+.B \-\-video
+Play video for each track. Streaming height is capped by
+.B video_height
+(default 1080 pixels); local files play at their original resolution.
+.TP
+.B \-\-detach
+Keep playback running after the command exits.
+.TP
+.BI "\-\-volume " number
+Set initial volume from 0 to 100 (default 80).
+.PP
+Headless selection accepts a result number followed by Enter.
+Use n/p followed by Enter to change pages, and q, Esc, or Ctrl+C to cancel.
+Ctrl+C cancels loading, stops attached playback, or cancels downloading.
+Detached playback remains available through
+.B dymus control
+and MPRIS.
+.SH TUI KEYS
+These are the default bindings; many can be changed under
+.B [keybindings]
+in the configuration file.
+.TP
+.B /, Enter
+Search, or filter the local library; play the selected track.
+.TP
+.B j/k, Up/Down
+Move the selection.
+.TP
+.B h, e, 1\-4, o, 5
+Home, Explore, library categories, World Radio, and local library.
+.TP
+.B L
+Refresh the local library.
+.TP
+.B Tab, t
+Switch views; open Now Playing.
+.TP
+.B Space, n, r
+Pause/resume, next track, retry playback.
+.TP
+.B V
+Toggle a compact video window and audio-only playback.
+The current position and pause state are preserved across a brief reload.
+.TP
+.B P, Q, a, A
+Play all, queue all, queue a selection, play a selection next.
+.TP
+.B x, v, d, J/K
+Mark, select all, remove, and reorder queue entries.
+.TP
+.B Left/Right, \-/+
+Seek five seconds; change volume.
+.TP
+.B ?, s, q, Ctrl+C
+Help, settings, quit, quit from any mode.
+.SH CONFIGURATION
+The TOML configuration is stored at
+.IR $XDG_CONFIG_HOME/dymus/config.toml ,
+or
+.I ~/.config/dymus/config.toml
+when XDG_CONFIG_HOME is unset or empty.
+Missing settings use built-in defaults.
+.PP
+.B video_height
+sets the streaming video cap (default 1080; range 144 to 4320).
+.B headless_search_results
+sets full YouTube search results (default 10; range 1 to 50).
+.B headless_results
+sets YouTube Music collection search results (default 5; range 1 to 25).
+.B start_view
+can be set to "local" to open directly into the offline library.
+.PP
+.B [local]
+accepts additional
+.B roots
+(default []),
+.BR include_downloads ,
+.BR scan_unindexed ,
+.BR recursive ,
+.BR read_tags ,
+and
+.BR video .
+All five switches default to true.
+ffprobe reads and caches local tags when available; filenames provide fallback metadata.
+.PP
+.B [downloads]
+sets
+.B audio_path
+(default "~/Music/Dymus"),
+.B video_path
+(default "~/Videos/Dymus"),
+.B audio_format
+(default "mp3"),
+.B video_format
+(default "mp4"),
+optional
+.BR video_height ,
+quality, naming, metadata, playlist, resume, archive, and progress settings.
+By default, downloads are organized under Singles, Albums, and Playlists,
+with numbered collection tracks, library.json, artwork, and relative M3U8 playlists.
+.PP
+.B lastfm_scrobbling
+and
+.B report_history
+control optional Last.fm and YouTube Music reporting.
+Local tracks can scrobble to Last.fm but never submit YouTube history.
+See the project README for all configuration settings.
+.SH FILES
+.TP
+.I ~/.config/dymus/config.toml
+Default configuration file.
+.TP
+.I ~/.config/dymus/auth.json
+YouTube Music session credentials.
+.TP
+.I $XDG_RUNTIME_DIR/dymus/
+Headless control socket, state, and integration log.
+The configuration directory is used when XDG_RUNTIME_DIR is unavailable.
+.TP
+.I library.json
+Portable local-library index in a download destination.
+.TP
+.I .dymus/playlists/*.m3u8
+Portable ordered playlists in a download destination.
+.TP
+.I $XDG_DATA_HOME/man/man1/dymus.1
+User-installed manual. The default data directory is
+.IR ~/.local/share .
+.SH ENVIRONMENT
+.TP
+.B XDG_CONFIG_HOME
+Override the configuration directory.
+.TP
+.B XDG_RUNTIME_DIR
+Override the base for headless runtime files.
+.TP
+.B XDG_DATA_HOME
+Override the data directory used by
+.BR "dymus man \-\-install" .
+.TP
+.B NO_COLOR
+Disable color in headless feedback.
+.SH DEPENDENCIES
+mpv is required for playback. yt-dlp is required for streaming and downloads.
+ffmpeg and ffprobe are required for downloads; ffprobe is optional for
+imported local metadata. PipeWire's pw-dump and pw-record enable optional
+reactive visualizers.
+.SH EXAMPLES
+.nf
+dymus
+dymus search "Nujabes Feather"
+dymus search "live jazz" \-\-json \-\-limit 20
+dymus play album "Modal Soul" \-\-detach
+dymus play song "Feather" \-\-video
+dymus local \-\-json
+dymus play local ~/Music/mix.m3u8 \-\-detach
+dymus play local \-\-path /media/music \-\-all
+dymus download playlist "Jazz" \-\-path ~/Music/Jazz
+dymus control volume 65
+dymus control stop
+dymus man \-\-install
+man dymus
+.fi
+.SH EXIT STATUS
+Zero indicates success or interactive cancellation.
+Nonzero indicates a configuration, dependency, network, or playback error.
+.SH SEE ALSO
+.BR mpv (1),
+.BR yt-dlp (1),
+.BR ffmpeg (1),
+.BR man (1)
+.PP
+Project documentation: https://github.com/britonmearsty/dymus

@@ -11,6 +11,7 @@ mod innertube;
 mod lastfm;
 mod local;
 mod lyrics;
+mod manual;
 mod model;
 mod mpris;
 mod player;
@@ -53,6 +54,14 @@ enum Command {
     },
     /// Check playback, download, and optional visualizer dependencies.
     Doctor,
+    /// Print the bundled man page or install it for your user.
+    Man {
+        #[arg(long)]
+        install: bool,
+        /// Man root directory; the page is placed under man1/dymus.1.
+        #[arg(long, requires = "install")]
+        directory: Option<std::path::PathBuf>,
+    },
     /// Play a song, album, or playlist without starting the TUI.
     Play {
         #[command(subcommand)]
@@ -236,6 +245,7 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Some(Command::Doctor) => doctor().await?,
+        Some(Command::Man { install, directory }) => manual::run(install, directory.as_deref())?,
         Some(Command::Download {
             target,
             video,

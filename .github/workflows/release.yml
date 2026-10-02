@@ -21,8 +21,11 @@ jobs:
         run: cargo build --release --locked
       - name: Package and checksum
         run: |
-          mkdir dist
-          tar -C target/release -czf dist/dymus-x86_64-unknown-linux-gnu.tar.gz dymus
+          mkdir -p dist/package
+          cp target/release/dymus dist/package/dymus
+          target/release/dymus man > dist/package/dymus.1
+          tar -C dist/package -czf dist/dymus-x86_64-unknown-linux-gnu.tar.gz dymus dymus.1
+          rm -r dist/package
           cd dist
           sha256sum dymus-x86_64-unknown-linux-gnu.tar.gz > dymus-x86_64-unknown-linux-gnu.tar.gz.sha256
       - name: Publish GitHub release

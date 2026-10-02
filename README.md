@@ -108,6 +108,28 @@ cargo run -- search "Rust tutorial" --limit 15 --detach
 cargo run -- search "Nujabes Feather" --json
 ```
 
+## Manual page
+
+Dymus bundles an offline manual covering commands, options, TUI keys,
+configuration, local media, downloads, and integrations. After a Cargo install:
+
+```sh
+dymus man --install
+man dymus
+```
+
+The page installs to `$XDG_DATA_HOME/man/man1/dymus.1`, defaulting to
+`~/.local/share/man/man1/dymus.1`. If your `man` search path does not include
+that directory, use `man -l ~/.local/share/man/man1/dymus.1` or add the man root
+with `export MANPATH="$HOME/.local/share/man:"`; the trailing colon preserves
+system manual paths. `dymus man` prints roff for packaging or `man -l` previews.
+`dymus man --install --directory /path/to/man` selects a different man root.
+
+Release archives include `dymus.1`; the shell installer installs it automatically
+when present. Set `MAN_DIR` to override its man root. Older binary-only releases
+remain installable. Cargo installs binaries only, so run `dymus man --install`
+after installing or upgrading with Cargo to refresh the manual.
+
 ## Headless playback
 
 Headless search uses full YouTube through yt-dlp, including music, interviews,
