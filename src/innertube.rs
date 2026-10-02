@@ -647,6 +647,7 @@ pub fn parse_search(response: &Value) -> Result<Vec<Track>> {
     }
     let contents = response
         .get("contents")
+        .or_else(|| response.get("continuationContents"))
         .context("Search response has no contents; the InnerTube API may have changed")?;
     let mut tracks = Vec::new();
     let mut seen = HashSet::new();
@@ -944,6 +945,40 @@ fn is_duration(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_watch_search_and_continuation_as_tracks() {
+        let item = json!({
+            "flexColumns": [
+                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Music video"}]}}},
+                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [
+                    {"text": "Artist", "navigationEndpoint": {"browseEndpoint": {"browseId": "UCartist"}}},
+                    {"text": " • "}, {"text": "12M views"}, {"text": " • "}, {"text": "4:38"}
+                ]}}}
+            ],
+            "overlay": {"musicItemThumbnailOverlayRenderer": {"content": {"musicPlayButtonRenderer": {
+                "playNavigationEndpoint": {"watchEndpoint": {"videoId": "video-id"}}
+            }}}}
+        });
+        let shelf = json!({
+            "contents": [{"musicResponsiveListItemRenderer": item.clone()},
+                {"musicResponsiveListItemRenderer": item}],
+            "continuations": [{"nextContinuationData": {"continuation": "next-page"}}]
+        });
+        for response in [
+            json!({"contents": {"musicShelfRenderer": shelf.clone()}}),
+            json!({"continuationContents": {"musicShelfContinuation": shelf}}),
+        ] {
+            let page = parse_search_page(&response, SearchFilter::Songs).unwrap();
+            assert!(page.items.is_empty());
+            assert_eq!(page.tracks.len(), 1);
+            assert_eq!(page.tracks[0].id, "video-id");
+            assert_eq!(page.tracks[0].artist, "Artist");
+            assert_eq!(page.tracks[0].duration, "4:38");
+            assert!(page.tracks[0].album.is_empty());
+            assert_eq!(page.continuation.as_deref(), Some("next-page"));
+        }
+    }
 
     #[test]
     fn parses_feed_cards_and_quick_pick_tracks() {

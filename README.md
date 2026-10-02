@@ -97,23 +97,50 @@ cargo build --release
 does not wait for those checks. Image-protocol detection uses a short probe and
 falls back to halfblocks when the terminal does not respond.
 
-Search can run without opening the TUI and returns JSON:
+Search full YouTube without opening the TUI, choose a numbered result, then
+choose audio-only or video playback:
 
 ```sh
 cargo run -- search "Nujabes Feather"
+cargo run -- search "Rust tutorial" --limit 15 --detach
+# Return JSON without prompting or starting playback:
+cargo run -- search "Nujabes Feather" --json
 ```
 
 ## Headless playback
 
-Play without opening the TUI by choosing the kind of result to resolve. Song
-searches show the first five matching tracks; album and playlist searches show
-the first five matching collections. Choose the numbered result to play it.
-Set `headless_results` in `~/.config/dymus/config.toml` to show between 1 and
-25 matches instead; the default is 5:
+Headless search uses full YouTube through yt-dlp, including music, interviews,
+tutorials, and other videos. `dymus search "query"` shows ten results by default;
+choose a result, then choose audio-only or video playback. `--detach` and
+`--volume` apply to either mode. Video playback defaults to a 1080p cap, configurable with `video_height`.
+
+Headless playback guides you through numbered steps with live loading indicators
+and elapsed time while searching, loading collections, resolving streams, and
+buffering playback. Result titles and channel/artist details use separate lines;
+long lists are paged to fit terminal height. Enter a result number, or use `n`
+and `p` followed by Enter to change pages. `q`, Esc, or Ctrl+C cancels a prompt;
+Ctrl+C cancels loading or stops attached playback. Detached playback shows the
+commands available to control it. `--json` prints results without this UI.
+
+Set `headless_search_results` in `~/.config/dymus/config.toml` to show between
+1 and 50 matches, or override it for one search with `--limit`:
 
 ```toml
-headless_results = 10
+headless_search_results = 15 # full YouTube search; default 10, range 1–50
+video_height = 1080          # maximum video height; default 1080, range 144–4320
+headless_results = 5         # YouTube Music collections; default 5, range 1–25
 ```
+
+`dymus play song "query"` and `dymus play song "query" --video` also search full
+YouTube and let you pick a result, using the same search cap. Audio is the
+default; pass `--video` to play video instead. Album, playlist, and signed-in library
+commands continue to use YouTube Music and the separate `headless_results` cap.
+
+`video_height` is a maximum, so a source with lower resolution plays at its best
+available height. Set it to `720`, `1080`, `1440`, or `2160`, for example.
+The chosen cap is saved with the playback queue so detached and later tracks
+use the same height even if the config changes. Both settings are top-level
+TOML keys, before sections such as `[colors]` and `[keybindings]`.
 
 To add authenticated tracks to YouTube Music history after they have genuinely
 played, opt in explicitly (it is off by default):
@@ -134,17 +161,36 @@ existing API key, shared secret, and session key privately. Dymus verifies the
 session before saving it. Every eligible non-radio track updates Last.fm Now Playing
 when playback loads and is scrobbled after the service's rule: more than 30
 seconds long and played for half its duration or four minutes, whichever comes
-first. This is enabled by default whenever credentials exist; set
+first. Both TUI and headless playback use the same credentials. Headless
+scrobbling counts actual listening time, excluding pauses and seeks, and
+reports each repeat separately. Requests run in the background.
+This is enabled by default whenever credentials exist; set
 `lastfm_scrobbling = false` in the configuration to disable it. Use
 `dymus lastfm status` to recheck the connection or `dymus lastfm logout` to
 remove only those credentials.
 
 ```sh
 dymus play song "Nujabes Feather"
-dymus play album "Modal Soul"
+dymus play song "Gorillaz Feel Good Inc" --video
+dymus play album "Modal Soul" --video
 dymus play playlist "Lo-fi beats" --detach --volume 65
 dymus play library playlists --detach
 ```
+
+`dymus play song "query" --video` searches full YouTube and opens the chosen
+result in an mpv window without starting the TUI. It supports `--detach` and
+`--volume`, and uses the same `dymus control` commands as audio playback.
+A graphical session is required. Video playback selects the best available
+video up to the configured `video_height`
+and the best audio stream separately, letting mpv synchronize them during
+streaming. If separate streams are unavailable, it falls back to a combined
+audio/video stream with the same height cap. `--video` works with song, album, playlist,
+and signed-in library playback and applies to every queued track, including
+when detached. Without the flag these commands play audio only. Tracks without
+an available video stream cannot play in video mode.
+
+`dymus search "query" --video` skips the audio/video mode prompt after choosing
+a result. Without that flag, search still lets you choose the playback mode.
 
 Without `--detach`, the command stays attached until mpv exits. Detached
 playback remains available after the shell command ends and can be controlled
@@ -161,6 +207,15 @@ dymus control stop
 Attached playback keeps one terminal line updated with the active track,
 play/pause state, and elapsed time. Use `--detach` when that display is not
 needed.
+
+Headless audio and video playback expose MPRIS as `org.mpris.MediaPlayer2.dymus.headless`
+(`Dymus (headless)`), including when detached. Desktop media keys and players
+can control playback, volume, seeking, repeat, shuffle, and the queue, with
+current track metadata and cover art. The TUI keeps its separate MPRIS identity.
+One event-driven worker handles desktop controls, Last.fm, optional YouTube
+Music history reporting, and background queue resolution. Integration failures
+are logged in `$XDG_RUNTIME_DIR/dymus/headless.log` (under the config directory
+when no runtime directory exists) and do not stop playback.
 
 The control socket is local to your user session and only one headless Dymus
 player can run at a time. Headless album and playlist playback may need YouTube
@@ -247,6 +302,8 @@ names such as `Tab`, `Space`, `Enter`, `Esc`, `Left`, and `Ctrl+U`.
 
 ```toml
 theme = "nord"
+video_height = 1080
+headless_search_results = 15
 start_view = "home" # home, explore, playlists, albums, artists, podcasts, radio, search, queue
 
 [colors]
@@ -331,9 +388,9 @@ selected station.
 
 Search can load additional pages with `L`; use `f` to choose songs, artists,
 albums, or playlists, then Enter to open a collection. Generated radio loads
-one mix and does not continue endlessly. Background playback is not included;
-while the TUI runs, MPRIS exposes it to desktop shells and media keys. Queue and
-search state stay in memory; exiting stops playback, though
+one mix and does not continue endlessly. Use headless `--detach` for background
+playback; MPRIS works in both modes. TUI queue and search state stay in memory;
+exiting the TUI stops its playback, though
 the upcoming queue is saved and restored on the next launch.
 Account-restricted tracks are not supported.
 

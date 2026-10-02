@@ -3,6 +3,8 @@ mod auth;
 mod cache;
 mod config;
 mod headless;
+mod headless_service;
+mod headless_ui;
 mod innertube;
 mod lastfm;
 mod lyrics;
@@ -12,6 +14,7 @@ mod player;
 mod radio;
 mod ui;
 mod visualizer;
+mod youtube;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -27,14 +30,32 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Search songs through InnerTube and print JSON, without starting the player.
-    Search { query: String },
+    /// Search all YouTube, choose a result, then play it as audio or video.
+    Search {
+        query: String,
+        /// Print results as JSON without prompting or playing.
+        #[arg(long)]
+        json: bool,
+        /// Override headless_search_results (1 to 50).
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=50))]
+        limit: Option<u8>,
+        /// Play the selected result as video without the mode prompt.
+        #[arg(long, conflicts_with = "json")]
+        video: bool,
+        #[arg(long)]
+        detach: bool,
+        #[arg(long, default_value_t = 80)]
+        volume: u8,
+    },
     /// Check playback and optional visualizer dependencies.
     Doctor,
     /// Play a song, album, or playlist without starting the TUI.
     Play {
         #[command(subcommand)]
         target: PlayTarget,
+        /// Stream video up to the configured video_height, for every track.
+        #[arg(long, global = true)]
+        video: bool,
         /// Leave playback running after this command exits.
         #[arg(long, global = true)]
         detach: bool,
@@ -51,6 +72,8 @@ enum Command {
     HeadlessResolve {
         #[arg(long, default_value_t = 1)]
         start: usize,
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Configure, check, or remove YouTube Music browser-session credentials.
     Auth {
@@ -126,18 +149,47 @@ enum LastFmCommand {
     Logout,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    match Cli::parse().command {
-        Some(Command::Search { query }) => {
-            let page = innertube::InnerTube::configured()?
-                .search(&query, innertube::SearchFilter::Songs)
-                .await?;
-            println!("{}", serde_json::to_string_pretty(&page.tracks)?);
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    // The background worker handles asynchronous I/O and needs no CPU-sized pool.
+    let mut runtime = if matches!(&cli.command, Some(Command::HeadlessResolve { .. })) {
+        tokio::runtime::Builder::new_current_thread()
+    } else {
+        tokio::runtime::Builder::new_multi_thread()
+    };
+    match runtime.enable_all().build()?.block_on(run(cli)) {
+        Err(error) if error.is::<headless_ui::Cancelled>() => {
+            println!("Cancelled. No new playback started.");
+            Ok(())
+        }
+        result => result,
+    }
+}
+
+async fn run(cli: Cli) -> Result<()> {
+    match cli.command {
+        Some(Command::Search {
+            query,
+            json,
+            video,
+            limit,
+            detach,
+            volume,
+        }) => {
+            if json {
+                let limit = limit
+                    .map(usize::from)
+                    .unwrap_or(config::Config::load()?.headless_search_results);
+                let tracks = youtube::search(&query, limit).await?;
+                println!("{}", serde_json::to_string_pretty(&tracks)?);
+            } else {
+                headless::search(&query, detach, volume, limit.map(usize::from), video).await?;
+            }
         }
         Some(Command::Doctor) => doctor().await?,
         Some(Command::Play {
             target,
+            video,
             detach,
             volume,
         }) => {
@@ -155,7 +207,7 @@ async fn main() -> Result<()> {
                     (headless::Target::Library(kind), String::new())
                 }
             };
-            headless::play(target.0, &target.1, detach, volume).await?;
+            headless::play(target.0, &target.1, detach, volume, video).await?;
         }
         Some(Command::Control { action }) => {
             let action = match action {
@@ -170,7 +222,9 @@ async fn main() -> Result<()> {
             };
             headless::control(action).await?;
         }
-        Some(Command::HeadlessResolve { start }) => headless::resolve_remaining(start).await?,
+        Some(Command::HeadlessResolve { start, session }) => {
+            headless::resolve_remaining(start, session.as_deref()).await?
+        }
         Some(Command::Auth {
             action: AuthCommand::Paste { auth_user },
         }) => {
@@ -390,4 +444,72 @@ fn dependency_help(program: &str) -> String {
         format!("install `{program}` with your distribution's package manager")
     };
     format!("{command}, then run `dymus doctor`")
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn video_flag_applies_to_every_headless_play_target() {
+        for args in [
+            vec!["dymus", "play", "song", "query", "--video"],
+            vec!["dymus", "play", "--video", "album", "query"],
+            vec!["dymus", "play", "playlist", "query", "--video", "--detach"],
+            vec!["dymus", "play", "library", "playlists", "--video"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(
+                cli.command,
+                Some(Command::Play { video: true, .. })
+            ));
+        }
+        assert!(matches!(
+            Cli::try_parse_from(["dymus", "play", "song", "query"])
+                .unwrap()
+                .command,
+            Some(Command::Play { video: false, .. })
+        ));
+        assert!(Cli::try_parse_from(["dymus", "play", "video", "query"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from(["dymus", "search", "query", "--video"])
+                .unwrap()
+                .command,
+            Some(Command::Search { video: true, .. })
+        ));
+        assert!(Cli::try_parse_from(["dymus", "search", "query", "--json", "--video"]).is_err());
+    }
+
+    #[test]
+    fn search_accepts_interactive_controls_and_json_with_a_bounded_limit() {
+        let cli = Cli::try_parse_from([
+            "dymus",
+            "search",
+            "any video",
+            "--detach",
+            "--limit",
+            "15",
+            "--volume",
+            "65",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Search {
+                json: false,
+                detach: true,
+                limit: Some(15),
+                volume: 65,
+                ..
+            })
+        ));
+        let cli = Cli::try_parse_from(["dymus", "search", "any video", "--json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Search { json: true, .. })
+        ));
+        for limit in ["0", "51"] {
+            assert!(Cli::try_parse_from(["dymus", "search", "query", "--limit", limit]).is_err());
+        }
+    }
 }

@@ -1,4 +1,5 @@
 //! Stream extraction and audio playback live outside the terminal event loop.
+use std::os::unix::process::CommandExt;
 use std::{io::Write, process::Stdio, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -133,6 +134,41 @@ pub async fn resolve(video_id: &str) -> Result<String> {
         );
         return Ok(stream_url.to_owned());
     }
+    resolve_format(video_id, "bestaudio/best")
+        .await?
+        .into_iter()
+        .next()
+        .context("yt-dlp returned no playable stream")
+}
+
+pub struct VideoSource {
+    pub video: String,
+    pub audio: Option<String>,
+}
+
+/// Prefer separate video within the height cap and audio; allow a combined fallback.
+pub async fn resolve_video(video_id: &str, height: u32) -> Result<VideoSource> {
+    let urls = resolve_format(video_id, &video_format(height)).await?;
+    video_source(urls)
+}
+
+fn video_format(height: u32) -> String {
+    format!("bestvideo[height<={height}]+bestaudio/best[height<={height}]")
+}
+
+fn video_source(urls: Vec<String>) -> Result<VideoSource> {
+    anyhow::ensure!(
+        (1..=2).contains(&urls.len()),
+        "Expected one combined stream or a video/audio pair"
+    );
+    let mut urls = urls.into_iter();
+    Ok(VideoSource {
+        video: urls.next().context("yt-dlp returned no video stream")?,
+        audio: urls.next(),
+    })
+}
+
+async fn resolve_format(video_id: &str, format: &str) -> Result<Vec<String>> {
     // yt-dlp needs the same authenticated browser session as InnerTube when
     // YouTube presents a bot check. Keep its Netscape jar private and alive
     // only for this child process; it is never a command-line argument itself.
@@ -140,12 +176,13 @@ pub async fn resolve(video_id: &str) -> Result<String> {
         .map(|auth| youtube_cookie_jar(auth.cookie()))
         .transpose()?;
     let mut command = Command::new("yt-dlp");
+    command.as_std_mut().process_group(0);
     command.args([
         "--ignore-config",
         "--no-playlist",
         "--no-warnings",
         "--format",
-        "bestaudio/best",
+        format,
         "--get-url",
     ]);
     if let Some(cookies) = &cookies {
@@ -155,7 +192,7 @@ pub async fn resolve(video_id: &str) -> Result<String> {
         Duration::from_secs(45),
         command
             .arg("--")
-            .arg(format!("https://music.youtube.com/watch?v={video_id}"))
+            .arg(format!("https://www.youtube.com/watch?v={video_id}"))
             .stdin(Stdio::null())
             .kill_on_drop(true)
             .output(),
@@ -171,14 +208,20 @@ pub async fn resolve(video_id: &str) -> Result<String> {
         );
     }
     let text = String::from_utf8(output.stdout).context("Invalid stream URL")?;
-    let url = text
-        .lines()
-        .find(|line| line.starts_with("https://") || line.starts_with("http://"))
-        .context("yt-dlp returned no playable stream")?;
-    Ok(url.to_owned())
+    parse_stream_urls(&text)
 }
 
-fn youtube_cookie_jar(cookie_header: &str) -> Result<tempfile::NamedTempFile> {
+fn parse_stream_urls(text: &str) -> Result<Vec<String>> {
+    let urls: Vec<_> = text
+        .lines()
+        .filter(|line| line.starts_with("https://") || line.starts_with("http://"))
+        .map(ToOwned::to_owned)
+        .collect();
+    anyhow::ensure!(!urls.is_empty(), "yt-dlp returned no playable stream");
+    Ok(urls)
+}
+
+pub(crate) fn youtube_cookie_jar(cookie_header: &str) -> Result<tempfile::NamedTempFile> {
     let mut jar =
         tempfile::NamedTempFile::new().context("Cannot create private yt-dlp cookie jar")?;
     jar.write_all(b"# Netscape HTTP Cookie File\n")?;
@@ -400,6 +443,27 @@ async fn write_command(write: &mut tokio::net::unix::OwnedWriteHalf, command: Va
 mod tests {
     use super::*;
     use std::io::{Read, Seek, SeekFrom};
+
+    #[test]
+    fn preserves_separate_video_and_audio_urls() {
+        let source = video_source(
+            parse_stream_urls("https://example.com/video?x=1&y=2\nhttps://example.com/audio\n")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(source.video, "https://example.com/video?x=1&y=2");
+        assert_eq!(source.audio.as_deref(), Some("https://example.com/audio"));
+    }
+
+    #[test]
+    fn accepts_combined_stream_and_rejects_invalid_resolver_output() {
+        let source =
+            video_source(parse_stream_urls("https://example.com/combined\n").unwrap()).unwrap();
+        assert!(source.audio.is_none());
+        assert!(parse_stream_urls("\nnot a stream\n").is_err());
+        assert!(video_source(Vec::new()).is_err());
+        assert!(video_source(vec!["a".into(), "b".into(), "c".into()]).is_err());
+    }
 
     #[test]
     fn writes_a_netscape_cookie_jar_for_youtube() {

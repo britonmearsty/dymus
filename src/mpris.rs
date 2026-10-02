@@ -54,6 +54,9 @@ pub enum Update {
     LoopStatus(LoopStatus),
     Shuffle(bool),
     CanGoNext(bool),
+    CanGoPrevious(bool),
+    CanSeek(bool),
+    ClearTrack,
     Seeked {
         seconds: f64,
     },
@@ -68,11 +71,15 @@ pub struct Mpris {
 
 impl Mpris {
     pub fn spawn() -> Self {
+        Self::spawn_named("dymus", "Dymus")
+    }
+
+    pub fn spawn_named(name: &'static str, identity: &'static str) -> Self {
         let (updates_tx, updates_rx) = tokio::sync::mpsc::unbounded_channel();
         let (commands_tx, commands_rx) = tokio::sync::mpsc::unbounded_channel();
         let handle = thread::Builder::new()
             .name("dymus-mpris".to_owned())
-            .spawn(move || driver(updates_rx, commands_tx))
+            .spawn(move || driver(updates_rx, commands_tx, name, identity))
             .ok();
         Self {
             updates: Some(updates_tx),
@@ -97,6 +104,13 @@ impl Mpris {
         commands
     }
 
+    pub async fn next_command(&mut self) -> Option<MprisCommand> {
+        match &mut self.commands {
+            Some(commands) => commands.recv().await,
+            None => None,
+        }
+    }
+
     /// Stops the service and releases the bus name. Dropping the sender first
     /// makes the MPRIS thread exit, so joining never hangs.
     pub fn shutdown(&mut self) {
@@ -108,10 +122,20 @@ impl Mpris {
 }
 
 // The service thread: in tests it merely fails to connect and exits.
-fn driver(mut updates: UnboundedReceiver<Update>, commands: UnboundedSender<MprisCommand>) {
-    // A multi-thread runtime keeps zbus's I/O driver alive while the terminal
-    // event loop waits between state updates.
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
+impl Drop for Mpris {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn driver(
+    mut updates: UnboundedReceiver<Update>,
+    commands: UnboundedSender<MprisCommand>,
+    name: &'static str,
+    identity: &'static str,
+) {
+    // The service owns one runtime thread; zbus I/O and updates share its event loop.
+    let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
@@ -119,8 +143,8 @@ fn driver(mut updates: UnboundedReceiver<Update>, commands: UnboundedSender<Mpri
         Err(_) => return,
     };
     runtime.block_on(async {
-        let player = match Player::builder("dymus")
-            .identity("Dymus")
+        let player = match Player::builder(name)
+            .identity(identity)
             .supported_uri_schemes(["http", "https"])
             .can_quit(true)
             .can_play(true)
@@ -169,7 +193,10 @@ fn driver(mut updates: UnboundedReceiver<Update>, commands: UnboundedSender<Mpri
             });
         });
         let set_position = commands.clone();
-        player.connect_set_position(move |_player, _track, position| {
+        player.connect_set_position(move |player, track, position| {
+            if player.metadata().trackid().as_ref() != Some(track) {
+                return;
+            }
             let _ = set_position.send(MprisCommand::SetPosition {
                 position_micros: position.as_micros(),
             });
@@ -233,9 +260,7 @@ async fn apply(player: &Player, update: Update, state: &mut TrackState) {
             state.artist = Some(artist);
             state.album = Some(album);
             state.video_id = video_id;
-            if duration_secs > 0.0 {
-                state.duration_micros = (duration_secs * 1_000_000.0) as i64;
-            }
+            state.duration_micros = (duration_secs.max(0.0) * 1_000_000.0) as i64;
             state.position_micros = 0;
             player.set_position(Time::ZERO);
             let _ = player.set_metadata(metadata_for(state)).await;
@@ -262,6 +287,17 @@ async fn apply(player: &Player, update: Update, state: &mut TrackState) {
         }
         Update::CanGoNext(can) => {
             let _ = player.set_can_go_next(can).await;
+        }
+        Update::CanGoPrevious(can) => {
+            let _ = player.set_can_go_previous(can).await;
+        }
+        Update::CanSeek(can) => {
+            let _ = player.set_can_seek(can).await;
+        }
+        Update::ClearTrack => {
+            *state = TrackState::default();
+            player.set_position(Time::ZERO);
+            let _ = player.set_metadata(metadata_for(state)).await;
         }
         Update::Seeked { seconds } => {
             state.position_micros = (seconds.max(0.0) * 1_000_000.0) as i64;

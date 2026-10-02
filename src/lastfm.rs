@@ -17,6 +17,7 @@ const ENDPOINT: &str = "https://ws.audioscrobbler.com/2.0/";
 pub struct Client {
     auth: LastFmAuth,
     http: reqwest::Client,
+    endpoint: String,
 }
 
 /// Complete Last.fm's desktop authorization flow. The URL is always printed
@@ -127,8 +128,11 @@ impl Client {
             "Last.fm session key cannot be empty"
         );
         Ok(Self {
+            endpoint: ENDPOINT.into(),
             auth,
-            http: reqwest::Client::builder().build()?,
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()?,
         })
     }
 
@@ -177,7 +181,7 @@ impl Client {
         params.insert("format".into(), "json".into());
         let value: Value = self
             .http
-            .post(ENDPOINT)
+            .post(&self.endpoint)
             .form(&params)
             .send()
             .await
@@ -227,6 +231,77 @@ pub fn eligible_after(duration: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn submits_signed_now_playing_and_scrobble_requests() {
+        use tokio::{
+            io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+            net::TcpListener,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = Client::new(LastFmAuth {
+            api_key: "key".into(),
+            shared_secret: "secret".into(),
+            session_key: "session".into(),
+        })
+        .unwrap();
+        client.endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for _ in 0..2 {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    socket.read_line(&mut line).await.unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                socket.read_exact(&mut body).await.unwrap();
+                bodies.push(String::from_utf8(body).unwrap());
+                socket.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}").await.unwrap();
+            }
+            bodies
+        });
+        let track = Track {
+            id: "video".into(),
+            title: "Title".into(),
+            artist: "Artist".into(),
+            album: "Album".into(),
+            duration: "1:00".into(),
+        };
+        client.now_playing(&track, 60).await.unwrap();
+        client.scrobble(&track, 60, 123).await.unwrap();
+        let bodies = server.await.unwrap();
+        for (body, method) in bodies
+            .iter()
+            .zip(["track.updateNowPlaying", "track.scrobble"])
+        {
+            let mut params: BTreeMap<String, String> = body
+                .split('&')
+                .map(|part| {
+                    let (key, value) = part.split_once('=').unwrap();
+                    (key.into(), value.into())
+                })
+                .collect();
+            let supplied_signature = params.remove("api_sig").unwrap();
+            assert_eq!(params.remove("format").as_deref(), Some("json"));
+            assert_eq!(supplied_signature, signature(&params, "secret"));
+            assert_eq!(params["method"], method);
+            assert_eq!(params["artist"], "Artist");
+            assert_eq!(params["track"], "Title");
+            assert_eq!(params["album"], "Album");
+            assert_eq!(params["duration"], "60");
+            assert_eq!(params["sk"], "session");
+        }
+        assert!(!bodies[0].contains("timestamp="));
+        assert!(bodies[1].contains("timestamp=123"));
+    }
     #[test]
     fn signs_sorted_parameters() {
         let params = BTreeMap::from([("b".into(), "two".into()), ("a".into(), "one".into())]);

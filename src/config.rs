@@ -12,8 +12,12 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub theme: String,
     pub start_view: String,
-    /// Number of matches shown by the interactive headless playback picker.
+    /// Number of YouTube Music collections shown by the headless picker.
     pub headless_results: usize,
+    /// Number of full YouTube matches shown by headless search (1 to 50).
+    pub headless_search_results: usize,
+    /// Maximum headless video height in pixels (144 to 4320).
+    pub video_height: u32,
     /// Send authenticated playback history after the configured listen threshold.
     pub report_history: bool,
     /// Seconds listened before an eligible track is added to YouTube Music history.
@@ -30,6 +34,8 @@ impl Default for Config {
             theme: "tokyo-night".into(),
             start_view: "home".into(),
             headless_results: 5,
+            headless_search_results: 10,
+            video_height: 1080,
             report_history: false,
             report_history_after_seconds: 30,
             lastfm_scrobbling: true,
@@ -184,7 +190,6 @@ impl Config {
         }
     }
 
-    #[cfg(not(test))]
     pub fn normalize(&mut self) {
         if !THEMES.contains(&self.theme.as_str()) {
             self.theme = "tokyo-night".into();
@@ -195,6 +200,8 @@ impl Config {
             self.start_view = "home".into();
         }
         self.headless_results = self.headless_results.clamp(1, 25);
+        self.headless_search_results = self.headless_search_results.clamp(1, 50);
+        self.video_height = self.video_height.clamp(144, 4320);
         self.report_history_after_seconds = self.report_history_after_seconds.clamp(1, 3600);
     }
 
@@ -293,6 +300,44 @@ pub fn config_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn youtube_search_cap_is_independent_and_normalized() {
+        let mut config: Config =
+            toml::from_str("headless_results = 3\nheadless_search_results = 50").unwrap();
+        config.normalize();
+        assert_eq!(config.headless_results, 3);
+        assert_eq!(config.headless_search_results, 50);
+        config.headless_search_results = 0;
+        config.normalize();
+        assert_eq!(config.headless_search_results, 1);
+        config.headless_search_results = 100;
+        config.normalize();
+        assert_eq!(config.headless_search_results, 50);
+        let legacy: Config = toml::from_str("headless_results = 3").unwrap();
+        assert_eq!(legacy.headless_search_results, 10);
+    }
+
+    #[test]
+    fn video_height_defaults_and_configured_limits_are_normalized() {
+        let mut config: Config =
+            toml::from_str("video_height = 2160\nheadless_search_results = 20").unwrap();
+        config.normalize();
+        assert_eq!(config.video_height, 2160);
+        assert_eq!(config.headless_search_results, 20);
+        config.video_height = 0;
+        config.normalize();
+        assert_eq!(config.video_height, 144);
+        config.video_height = 9999;
+        config.normalize();
+        assert_eq!(config.video_height, 4320);
+        assert_eq!(toml::from_str::<Config>("").unwrap().video_height, 1080);
+        let encoded = toml::to_string(&config).unwrap();
+        assert_eq!(
+            toml::from_str::<Config>(&encoded).unwrap().video_height,
+            4320
+        );
+    }
+
     #[test]
     fn defaults_and_partial_toml_overrides_are_valid() {
         let config: Config = toml::from_str(
