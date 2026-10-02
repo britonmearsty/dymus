@@ -1,46 +1,44 @@
 # Contributing to Dymus
 
-Thanks for considering contributing! This is a small, single-maintainer project, so please be friendly and keep changes focused.
+Thanks for helping improve Dymus. The project welcomes bug reports, focused feature proposals, and pull requests for its keyboard-driven terminal music player.
+
+## What makes a contribution a good fit
+
+- It addresses a clear bug or improves a real user workflow in the terminal player, headless player, or local library.
+- The change is focused and has a clear description of its behavior and tradeoffs.
+- Relevant tests and documentation are updated. User-visible behavior, commands, configuration, and controls should be documented where appropriate.
+- It does not include credentials, browser cookies, personal data, or generated build artifacts.
+- Contributions are submitted under the project's MIT license.
+
+A passing CI run is required before merging. The `CI / test` job checks formatting, Clippy, tests, the release build, and the bundled man page. Maintainers make the final decision on scope and merging; passing CI alone does not guarantee acceptance. There is no fixed review-count requirement, so a maintainer may merge after reviewing and addressing any feedback.
 
 ## Reporting a bug
 
-Open an [issue](https://github.com/britonmearsty/dymus/issues) with:
-
-- the `dymus --version` output,
-- your terminal type and size (e.g. Alacritty, 120×40),
-- steps to reproduce, and
-- any log output (run with `RUST_LOG=debug dymus` if it helps).
+[Open an issue](https://github.com/britonmearsty/dymus/issues/new) with the `dymus --version` output, your terminal and its size, steps to reproduce, and relevant logs. Check logs before sharing to ensure they contain no credentials or private data.
 
 ## Suggesting a feature
 
-Open an issue describing the problem you're trying to solve. Proposals that fit the "keyboard-driven terminal client" focus are most likely to land.
+[Open an issue](https://github.com/britonmearsty/dymus/issues/new) explaining the problem and who it affects. Discuss substantial changes before investing in a large implementation; proposals that fit the terminal music-player focus are most likely to land.
 
-## Making a pull request
+## Opening a pull request
 
-1. Fork the repo and create a branch off `master`.
-2. Keep changes focused: one logical change per PR, with a clear title.
-3. Update the README if behavior or controls change.
-4. Add or update tests where practical (see the optional integration tests below).
-5. Verify everything passes before opening the PR:
+1. Fork the repository and branch from `master`.
+2. Keep each pull request focused on one logical change. Link a related issue when there is one; an issue is not required for a small fix.
+3. Explain the problem and resulting behavior. Include terminal details or screenshots when they help reviewers assess a UI change.
+4. Update relevant documentation and tests.
+5. Run the checks that apply to your changes:
 
    ```sh
    cargo fmt --check
-   cargo clippy --all-targets -- -D warnings
-   cargo test
-
-   # Optional: mpv integration (generated silence, null audio output)
-   cargo test mpv_reports_playback_and_eof_with_local_audio -- --ignored
-   # Optional: live network tests
-   cargo test live_search_resolve_and_stream_audio -- --ignored --nocapture
-   cargo test live_radio_returns_related_tracks -- --ignored --nocapture
+   cargo clippy --all-targets --all-features -- -D warnings
+   cargo test --locked
+   cargo build --release --locked
+   sh scripts/check-manpage.sh ./target/release/dymus
    ```
 
-6. Push and open the PR. The CI workflow runs the fmt, clippy, and test commands above, so a green PR is expected.
+   The manual check requires `groff`. GitHub Actions runs all of these checks on pull requests. Optional mpv and live-network integration tests are described in the README.
+6. Respond to review feedback and make sure required CI checks pass. Maintainers review and merge contributions.
 
-## Reviewing
+## Conduct
 
-Maintainers review PRs, run the checks locally, may test the GUI manually, and merge. Please be patient — small hobby projects move at their own pace.
-
-## Code of conduct
-
-Be respectful. Harassment and trolling are not welcome. This project is small, so conflicts are rare; if something feels wrong, open an issue or email the maintainer.
+Treat contributors and users respectfully. Harassment and trolling are not welcome. If a concern comes up, raise it in the issue tracker or contact the maintainer.
