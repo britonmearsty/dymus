@@ -498,12 +498,30 @@ radio, and World Radio work without an account.
    `dymus auth status` to check the saved session and `dymus auth logout` to
    remove it.
 
+You can import cookies directly from a browser supported by yt-dlp:
+
+```sh
+dymus auth browser
+dymus auth browser --browser chrome
+```
+
+Supported browsers are Brave, Chrome, Chromium, Edge, Firefox, Opera, Safari,
+Vivaldi, and Whale (subject to the installed yt-dlp version). Use `--profile`
+to select a profile by name or path. Firefox also accepts `--container` for a
+Multi-Account Container. Chromium-based browsers on Linux can use `--keyring`
+to select the cookie decryption keyring (`basictext`, `gnomekeyring`, `kwallet`,
+`kwallet5`, or `kwallet6`). The importer keeps only secure YouTube Music cookies
+in a private temporary file, validates the account, and removes that file. If
+the browser profile is locked or cannot be read, close the browser and retry.
+`dymus auth paste` remains available.
+
 Credentials live in `$XDG_CONFIG_HOME/dymus/auth.json` (normally
 `~/.config/dymus/auth.json`). Dymus creates the directory with `0700` and the
 file with `0600`. For authenticated stream resolution it creates a private,
 short-lived yt-dlp cookie jar and removes it as soon as the resolver exits; it
-never reads browser profiles or logs cookie values. The file is protected by
-filesystem permissions but is not encrypted.
+does not log cookie values. The file is protected by filesystem permissions
+but is not encrypted. Browser profiles are read only when explicitly requested
+with `dymus auth browser`.
 
 Browser cookies are bearer credentials. Do not put them in issues, chat, shell
 history, or source files. If exposed, revoke that Google session and use a fresh

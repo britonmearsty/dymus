@@ -187,6 +187,24 @@ enum AuthCommand {
         #[arg(long, default_value = "0")]
         auth_user: String,
     },
+    /// Import YouTube Music cookies from a browser supported by yt-dlp.
+    Browser {
+        /// Browser to read (defaults to Firefox).
+        #[arg(long, default_value = "firefox", value_parser = ["brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi", "whale"])]
+        browser: String,
+        /// Browser profile name or path (defaults to the active profile).
+        #[arg(long)]
+        profile: Option<String>,
+        /// Firefox Multi-Account Containers container name (Firefox only).
+        #[arg(long)]
+        container: Option<String>,
+        /// Chromium cookie decryption keyring (basictext, gnomekeyring, kwallet, kwallet5, or kwallet6).
+        #[arg(long)]
+        keyring: Option<String>,
+        /// X-Goog-AuthUser account index (usually 0).
+        #[arg(long, default_value = "0")]
+        auth_user: String,
+    },
     /// Validate the configured session and show its account name.
     Status,
     /// Remove Dymus's locally stored credentials.
@@ -353,6 +371,33 @@ async fn run(cli: Cli) -> Result<()> {
             auth::save(&credentials)?;
             println!(
                 "Signed in as {account}. Credentials saved to Dymus's private configuration directory."
+            );
+        }
+        Some(Command::Auth {
+            action:
+                AuthCommand::Browser {
+                    browser,
+                    profile,
+                    container,
+                    keyring,
+                    auth_user,
+                },
+        }) => {
+            let credentials = auth::from_browser(
+                &browser,
+                profile.as_deref(),
+                container.as_deref(),
+                keyring.as_deref(),
+                &auth_user,
+            )
+            .await?;
+            let account = innertube::InnerTube::new()?
+                .with_auth(credentials.clone())
+                .validate_session()
+                .await?;
+            auth::save(&credentials)?;
+            println!(
+                "Signed in as {account}. Browser credentials saved to Dymus's private configuration directory."
             );
         }
         Some(Command::Lastfm {
