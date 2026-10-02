@@ -22,3 +22,8 @@ jobs:
         run: cargo test --locked
       - name: Build release binary
         run: cargo build --release --locked
+      - name: Validate bundled man page
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y groff
+          sh scripts/check-manpage.sh ./target/release/dymus
