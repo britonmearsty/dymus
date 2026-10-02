@@ -130,6 +130,17 @@ when present. Set `MAN_DIR` to override its man root. Older binary-only releases
 remain installable. Cargo installs binaries only, so run `dymus man --install`
 after installing or upgrading with Cargo to refresh the manual.
 
+To validate a changed manual locally (requires groff):
+
+```sh
+cargo test manual_documents_all_public_long_options
+cargo build
+sh scripts/check-manpage.sh ./target/debug/dymus
+```
+
+CI checks public long-option coverage and renders the bundled manual, rejecting
+roff diagnostics before changes can pass validation.
+
 ## Headless playback
 
 Headless search uses full YouTube through yt-dlp, including music, interviews,

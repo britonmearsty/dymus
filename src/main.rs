@@ -583,6 +583,84 @@ fn dependency_help(program: &str) -> String {
 mod cli_tests {
     use super::*;
 
+    fn missing_manual_options(command: &clap::Command, manual: &str) -> Vec<String> {
+        let text = manual.replace("\\-", "-");
+        let documented = text
+            .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_')
+            .collect::<std::collections::HashSet<_>>();
+        fn visit(
+            command: &clap::Command,
+            path: &str,
+            documented: &std::collections::HashSet<&str>,
+            missing: &mut Vec<String>,
+        ) {
+            for arg in command.get_arguments().filter(|arg| !arg.is_hide_set()) {
+                if let Some(long) = arg.get_long() {
+                    let option = format!("--{long}");
+                    if !documented.contains(option.as_str()) {
+                        missing.push(format!("{path}: {option}"));
+                    }
+                }
+            }
+            for child in command
+                .get_subcommands()
+                .filter(|command| !command.is_hide_set())
+            {
+                visit(
+                    child,
+                    &format!("{path} {}", child.get_name()),
+                    documented,
+                    missing,
+                );
+            }
+        }
+        let mut missing = Vec::new();
+        visit(command, command.get_name(), &documented, &mut missing);
+        missing
+    }
+
+    #[test]
+    fn manual_documents_all_public_long_options() {
+        use clap::CommandFactory;
+        let mut command = Cli::command();
+        command.build();
+        let missing = missing_manual_options(&command, &manual::render());
+        assert!(
+            missing.is_empty(),
+            "Undocumented CLI options: {}",
+            missing.join(", ")
+        );
+    }
+
+    #[test]
+    fn manual_coverage_detects_nested_flags_and_excludes_hidden_options() {
+        let mut command = clap::Command::new("dymus")
+            .disable_help_flag(true)
+            .disable_help_subcommand(true)
+            .arg(clap::Arg::new("path").long("path"))
+            .arg(clap::Arg::new("internal").long("internal").hide(true))
+            .subcommand(
+                clap::Command::new("public")
+                    .disable_help_flag(true)
+                    .arg(clap::Arg::new("new-feature").long("new-feature")),
+            )
+            .subcommand(
+                clap::Command::new("worker")
+                    .hide(true)
+                    .arg(clap::Arg::new("private").long("private")),
+            );
+        command.build();
+        assert_eq!(
+            missing_manual_options(&command, "\\-\\-path"),
+            vec!["dymus public: --new-feature"]
+        );
+        assert_eq!(
+            missing_manual_options(&command, "--pathology --new-feature"),
+            vec!["dymus: --path"]
+        );
+        assert!(missing_manual_options(&command, "--path --new-feature").is_empty());
+    }
+
     #[test]
     fn local_play_and_listing_accept_script_and_file_options() {
         assert!(matches!(
