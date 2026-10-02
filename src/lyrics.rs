@@ -9,7 +9,7 @@ pub struct Lyrics {
     #[serde(rename = "plainLyrics")]
     pub plain: Option<String>,
     #[serde(rename = "syncedLyrics")]
-    synced: Option<String>,
+    pub(crate) synced: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

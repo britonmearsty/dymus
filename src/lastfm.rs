@@ -11,6 +11,27 @@ use serde_json::Value;
 
 use crate::{auth::LastFmAuth, model::Track};
 
+// Shared listening clock excludes paused time and seeking in both interfaces.
+#[derive(Default)]
+pub(crate) struct Listening {
+    pub(crate) seconds: f64,
+    pub(crate) previous: Option<(f64, std::time::Instant)>,
+}
+impl Listening {
+    pub(crate) fn sample(&mut self, position: f64, now: std::time::Instant, playing: bool) {
+        if let Some((previous, sampled)) = self.previous
+            && playing
+        {
+            let advanced = (position - previous).max(0.0);
+            self.seconds += advanced.min(now.saturating_duration_since(sampled).as_secs_f64());
+        }
+        self.previous = Some((position, now));
+    }
+    pub(crate) fn discontinuity(&mut self) {
+        self.previous = None;
+    }
+}
+
 const ENDPOINT: &str = "https://ws.audioscrobbler.com/2.0/";
 
 #[derive(Clone)]

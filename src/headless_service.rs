@@ -3,7 +3,7 @@ use crate::{
     auth,
     config::Config,
     innertube::InnerTube,
-    lastfm,
+    lastfm::{self, Listening},
     model::Track,
     mpris::{LoopStatus, Mpris, MprisCommand, PlaybackStatus, Update},
 };
@@ -21,26 +21,6 @@ pub fn media_tag(index: usize) -> String {
 }
 pub fn track_index(title: &str) -> Option<usize> {
     title.strip_prefix("dymus-track-")?.parse().ok()
-}
-
-#[derive(Default)]
-struct Listening {
-    seconds: f64,
-    previous: Option<(f64, Instant)>,
-}
-impl Listening {
-    fn sample(&mut self, position: f64, now: Instant, playing: bool) {
-        if let Some((previous, sampled)) = self.previous
-            && playing
-        {
-            let advanced = (position - previous).max(0.0);
-            self.seconds += advanced.min(now.saturating_duration_since(sampled).as_secs_f64());
-        }
-        self.previous = Some((position, now));
-    }
-    fn discontinuity(&mut self) {
-        self.previous = None;
-    }
 }
 
 #[derive(Debug)]
@@ -260,6 +240,7 @@ impl Playback {
                                 });
                             }
                             if !self.history_reported
+                                && crate::local::path(&track.id).is_none()
                                 && self
                                     .history_after
                                     .is_some_and(|after| self.listening.seconds >= after as f64)

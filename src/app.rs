@@ -178,6 +178,10 @@ pub struct App {
     pub queue_state: TableState,
     pub queue_focused: bool,
     pub library_focused: bool,
+    pub local_focused: bool,
+    local_library: crate::local::Library,
+    local_collections: Vec<crate::local::Collection>,
+    local_task: Option<JoinHandle<Result<crate::local::Library>>>,
     pub library_detail: bool,
     search_detail: bool,
     pub library_kind: LibraryKind,
@@ -239,6 +243,7 @@ pub struct App {
     repeat_history: Vec<Track>,
     shuffle_enabled: bool,
     lastfm_reported: bool,
+    listening: crate::lastfm::Listening,
     lastfm_started_at: Option<u64>,
     pub duration: f64,
     pub volume: u8,
@@ -247,6 +252,7 @@ pub struct App {
     mpris: Mpris,
     radio_api: RadioBrowser,
     generation: u64,
+    video_resume: Option<(f64, bool)>,
     search_task: Option<JoinHandle<Result<SearchPage>>>,
     search_appending: bool,
     radio_task: Option<JoinHandle<Result<Vec<Track>>>>,
@@ -266,11 +272,14 @@ pub struct App {
 impl App {
     pub async fn new() -> Result<Self> {
         let config = Config::load()?;
-        let api = InnerTube::configured()?;
-        let auth_task = api.is_authenticated().then(|| {
+        let api = InnerTube::configured().or_else(|_| InnerTube::new())?;
+        let auth_task = (api.is_authenticated() && config.start_view != "local").then(|| {
             let api = api.clone();
             tokio::spawn(async move { api.validate_session().await })
         });
+        let mut player = Player::new();
+        player.local_video = config.local.video;
+        player.video_height = config.video_height;
         Ok(Self {
             input: String::new(),
             editing: true,
@@ -287,6 +296,10 @@ impl App {
             queue_state: TableState::default(),
             queue_focused: false,
             library_focused: false,
+            local_focused: false,
+            local_library: crate::local::Library::default(),
+            local_collections: Vec::new(),
+            local_task: None,
             library_detail: false,
             search_detail: false,
             library_kind: LibraryKind::Playlists,
@@ -348,14 +361,16 @@ impl App {
             repeat_history: Vec::new(),
             shuffle_enabled: false,
             lastfm_reported: false,
+            listening: crate::lastfm::Listening::default(),
             lastfm_started_at: None,
             duration: 0.0,
             volume: 70,
             api,
-            player: Player::new(),
+            player,
             mpris: Mpris::spawn(),
             radio_api: RadioBrowser::new()?,
             generation: 0,
+            video_resume: None,
             search_task: None,
             search_appending: false,
             radio_task: None,
@@ -374,7 +389,7 @@ impl App {
     }
 
     pub fn start(&mut self) {
-        if self.auth_task.is_none() {
+        if self.auth_task.is_none() && self.config.start_view != "local" {
             self.notice(
                 "Not signed in — public music works; `dymus auth paste` unlocks your library",
                 ToastKind::Info,
@@ -432,6 +447,15 @@ impl App {
                 }
                 #[cfg(not(test))]
                 self.load_library(LibraryKind::Podcasts);
+            }
+            "local" => {
+                #[cfg(test)]
+                {
+                    self.local_focused = true;
+                    self.library_focused = true;
+                }
+                #[cfg(not(test))]
+                self.load_local();
             }
             "radio" => {
                 #[cfg(test)]
@@ -520,6 +544,7 @@ impl App {
             self.poll_radio().await;
             self.poll_stations().await;
             self.poll_library().await;
+            self.poll_local().await;
             self.poll_discovery().await;
             self.poll_cover().await;
             self.poll_lyrics().await;
@@ -773,6 +798,13 @@ impl App {
         if self.editing {
             match key.code {
                 KeyCode::Esc => self.editing = false,
+                KeyCode::Enter if self.local_focused => {
+                    self.query = self.input.trim().to_owned();
+                    self.editing = false;
+                    self.library_detail = false;
+                    self.results.clear();
+                    self.filter_local();
+                }
                 KeyCode::Enter => self.search(),
                 KeyCode::Backspace => {
                     self.input.pop();
@@ -836,6 +868,14 @@ impl App {
                 return false;
             }
         }
+        if !self.now_playing_view && binding_matches(self.config.keybindings.get("local"), key) {
+            self.load_local();
+            return false;
+        }
+        if self.local_focused && key.code == KeyCode::Char('L') {
+            self.load_local();
+            return false;
+        }
         if !self.now_playing_view && binding_matches(self.config.keybindings.get("radio"), key) {
             self.load_radio();
             return false;
@@ -843,6 +883,7 @@ impl App {
         if binding_matches(self.config.keybindings.get("queue"), key) {
             self.queue_focused = !self.queue_focused;
             self.library_focused = false;
+            self.local_focused = false;
             self.home_focused = false;
             self.explore_focused = false;
             self.radio_focused = false;
@@ -852,6 +893,10 @@ impl App {
             && self.queue.current.is_some()
         {
             self.open_now_playing();
+            return false;
+        }
+        if binding_matches(self.config.keybindings.get("video"), key) {
+            self.toggle_video();
             return false;
         }
         if binding_matches(self.config.keybindings.get("pause"), key)
@@ -941,6 +986,7 @@ impl App {
                 if self.library_focused && self.library_detail {
                     if self.search_detail {
                         self.library_focused = false;
+                        self.local_focused = false;
                         self.search_detail = false;
                     }
                     self.library_detail = false;
@@ -983,6 +1029,7 @@ impl App {
             KeyCode::Tab | KeyCode::BackTab => {
                 self.queue_focused = !self.queue_focused;
                 self.library_focused = false;
+                self.local_focused = false;
                 self.home_focused = false;
                 self.explore_focused = false;
                 self.radio_focused = false;
@@ -1324,6 +1371,13 @@ impl App {
     }
 
     fn start_radio(&mut self, seed: Track) {
+        if crate::local::path(&seed.id).is_some() {
+            self.notice(
+                "Radio requires a YouTube track; local files remain queued",
+                ToastKind::Info,
+            );
+            return;
+        }
         self.cancel_radio();
         self.clear_toast();
         let api = self.api.clone();
@@ -1366,12 +1420,14 @@ impl App {
     }
 
     fn load_radio(&mut self) {
+        self.leave_local();
         self.editing = false;
         self.radio_editing = false;
         self.radio_focused = true;
         self.home_focused = false;
         self.explore_focused = false;
         self.library_focused = false;
+        self.local_focused = false;
         self.library_detail = false;
         self.content_detail = false;
         self.queue_focused = false;
@@ -1487,6 +1543,7 @@ impl App {
     }
 
     fn search(&mut self) {
+        self.leave_local();
         let query = self.input.trim().to_owned();
         if query.is_empty() {
             return;
@@ -1498,6 +1555,7 @@ impl App {
         self.editing = false;
         self.queue_focused = false;
         self.library_focused = false;
+        self.local_focused = false;
         self.home_focused = false;
         self.explore_focused = false;
         self.radio_focused = false;
@@ -1556,7 +1614,122 @@ impl App {
         self.detail_task = Some(tokio::spawn(async move { api.library_tracks(&item).await }));
     }
 
+    fn leave_local(&mut self) {
+        self.local_focused = false;
+        if let Some(task) = self.local_task.take() {
+            task.abort();
+        }
+    }
+    fn load_local(&mut self) {
+        if let Some(task) = self.local_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.library_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.detail_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.discovery_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.search_task.take() {
+            task.abort();
+        }
+        self.searching = false;
+        self.discovery_loading = false;
+        self.local_focused = true;
+        self.library_focused = true;
+        self.queue_focused = false;
+        self.home_focused = false;
+        self.explore_focused = false;
+        self.radio_focused = false;
+        self.now_playing_view = false;
+        self.editing = false;
+        self.library_detail = false;
+        self.search_detail = false;
+        self.content_detail = false;
+        self.library_loading = true;
+        self.library_continuation = None;
+        self.library_detail_continuation = None;
+        self.library_items.clear();
+        self.library_state.select(None);
+        self.result_marks.clear();
+        self.query.clear();
+        self.input.clear();
+        self.clear_toast();
+        let config = self.config.clone();
+        self.local_task = Some(tokio::spawn(crate::local::load(config, None)));
+    }
+    fn filter_local(&mut self) {
+        self.local_collections = self.local_library.clone().filtered(&self.query).collections;
+        self.library_items = self
+            .local_collections
+            .iter()
+            .map(|collection| LibraryItem {
+                title: collection.title.clone(),
+                detail: format!(
+                    "{} · {} · {} tracks · {} missing{}",
+                    collection.kind,
+                    collection.media_type,
+                    collection.tracks.len(),
+                    collection.missing,
+                    if collection.partial {
+                        " · partial"
+                    } else {
+                        ""
+                    }
+                ),
+                browse_id: collection.id.clone(),
+                section: "Local library".into(),
+                playlist_id: String::new(),
+                track: None,
+            })
+            .collect();
+        self.library_state
+            .select((!self.library_items.is_empty()).then_some(0));
+        self.result_marks.clear();
+    }
+    async fn poll_local(&mut self) {
+        if self
+            .local_task
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+            && let Some(task) = self.local_task.take()
+        {
+            let result = task.await;
+            if !self.local_focused {
+                return;
+            }
+            self.library_loading = false;
+            match result {
+                Ok(Ok(library)) => {
+                    let warnings = library.warnings.len();
+                    self.local_library = library;
+                    self.filter_local();
+                    if warnings > 0 {
+                        self.notice(
+                            format!(
+                                "Local library: {warnings} issue(s). {}",
+                                self.local_library.warnings[0]
+                            ),
+                            ToastKind::Error,
+                        );
+                    }
+                }
+                Ok(Err(error)) => {
+                    self.notice(format!("Local library failed: {error:#}"), ToastKind::Error)
+                }
+                Err(error) => self.notice(
+                    format!("Local library task failed: {error}"),
+                    ToastKind::Error,
+                ),
+            }
+        }
+    }
+
     fn load_library(&mut self, kind: LibraryKind) {
+        self.leave_local();
         if let Some(task) = self.library_task.take() {
             task.abort();
         }
@@ -1601,6 +1774,23 @@ impl App {
     }
 
     fn open_library_item(&mut self) {
+        if self.local_focused {
+            if let Some(collection) = self
+                .library_state
+                .selected()
+                .and_then(|i| self.local_collections.get(i))
+            {
+                self.results = collection.tracks.clone();
+                self.results_state
+                    .select((!self.results.is_empty()).then_some(0));
+                self.library_detail = true;
+                self.result_marks.clear();
+                if self.results.is_empty() {
+                    self.notice("No available files in this collection; refresh with L after restoring files", ToastKind::Info);
+                }
+            }
+            return;
+        }
         let Some(item) = self
             .library_state
             .selected()
@@ -1635,6 +1825,7 @@ impl App {
     }
 
     fn load_discovery(&mut self, explore: bool) {
+        self.leave_local();
         if let Some(task) = self.discovery_task.take() {
             task.abort();
         }
@@ -1646,6 +1837,7 @@ impl App {
         }
         self.queue_focused = false;
         self.library_focused = false;
+        self.local_focused = false;
         self.home_focused = !explore;
         self.explore_focused = explore;
         self.radio_focused = false;
@@ -1846,7 +2038,41 @@ impl App {
         }
     }
 
+    fn toggle_video(&mut self) {
+        if self
+            .queue
+            .current
+            .as_ref()
+            .is_some_and(|track| track.id.starts_with("radio:"))
+        {
+            self.notice("Radio has no video stream", ToastKind::Info);
+            return;
+        }
+        self.player.video = !self.player.video;
+        // An explicit audio choice also hides local video windows.
+        self.player.local_video = self.player.video;
+        if let Some(track) = self.queue.current.clone()
+            && matches!(self.playback, Playback::Playing | Playback::Paused)
+        {
+            self.video_resume = Some((self.position, self.playback == Playback::Paused));
+            self.listening.discontinuity();
+            self.generation += 1;
+            self.playback = Playback::Loading;
+            self.player.play(self.generation, track.id, self.volume);
+            self.preload_next();
+        }
+        self.notice(
+            if self.player.video {
+                "Video on · V returns to audio"
+            } else {
+                "Audio only · V enables video"
+            },
+            ToastKind::Info,
+        );
+    }
+
     fn play(&mut self, track: Track) {
+        self.video_resume = None;
         self.generation += 1;
         self.position = 0.0;
         self.history_reported = false;
@@ -1900,6 +2126,28 @@ impl App {
             return;
         };
         if track.id.starts_with("radio:") {
+            return;
+        }
+        if let Some(path) = crate::local::path(&track.id) {
+            let path = path.to_owned();
+            let generation = self.generation;
+            self.lyrics_loading = true;
+            self.lyrics_task = Some(tokio::spawn(async move {
+                let synced = tokio::fs::read_to_string(path.with_extension("lrc"))
+                    .await
+                    .ok();
+                let plain = tokio::fs::read_to_string(path.with_extension("txt"))
+                    .await
+                    .ok();
+                (
+                    generation,
+                    Ok(if synced.is_some() || plain.is_some() {
+                        Some(crate::lyrics::Lyrics { synced, plain })
+                    } else {
+                        None
+                    }),
+                )
+            }));
             return;
         }
         let (title, artist, album, duration) = (
@@ -1960,6 +2208,30 @@ impl App {
             return;
         };
         if track.id.starts_with("radio:") {
+            return;
+        }
+        if let Some(path) = crate::local::path(&track.id) {
+            let path = crate::local::artwork(path);
+            let generation = self.generation;
+            self.cover_loading = path.is_some();
+            self.cover_task = Some(tokio::spawn(async move {
+                let image = if let Some(path) = path {
+                    tokio::task::spawn_blocking(move || image::open(path).ok())
+                        .await
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                };
+                (
+                    generation,
+                    image.map(|image| CoverArt {
+                        image,
+                        protocol: None,
+                        protocol_area: None,
+                    }),
+                )
+            }));
             return;
         }
         self.cover_loading = true;
@@ -2319,11 +2591,29 @@ impl App {
             return;
         }
         match event {
+            Event::Loaded if self.video_resume.is_some() => {
+                let (position, paused) = self.video_resume.take().unwrap();
+                self.player
+                    .command(json!(["seek", position, "absolute+exact"]));
+                self.player
+                    .command(json!(["set_property", "pause", paused]));
+                self.playback = if paused {
+                    Playback::Paused
+                } else {
+                    Playback::Playing
+                };
+            }
             Event::Loaded => {
+                self.listening = crate::lastfm::Listening::default();
+                self.listening.sample(0.0, Instant::now(), false);
+                self.lastfm_reported = false;
+                self.history_reported = false;
                 self.playback = Playback::Playing;
                 self.start_lastfm();
             }
             Event::Position(position) => {
+                self.listening
+                    .sample(position, Instant::now(), self.playback == Playback::Playing);
                 self.position = position;
                 self.mpris_update(mpris::Update::Position { seconds: position });
                 self.maybe_report_history();
@@ -2361,9 +2651,11 @@ impl App {
                 self.audio_available = false;
                 self.audio_capture_error = Some(error);
             }
+            Event::Seeking => self.listening.discontinuity(),
             Event::Paused(paused)
                 if matches!(self.playback, Playback::Playing | Playback::Paused) =>
             {
+                self.listening.discontinuity();
                 self.playback = if paused {
                     Playback::Paused
                 } else {
@@ -2396,7 +2688,7 @@ impl App {
     fn maybe_report_history(&mut self) {
         if self.history_reported
             || !self.config.report_history
-            || self.position < self.config.report_history_after_seconds as f64
+            || self.listening.seconds < self.config.report_history_after_seconds as f64
             || !self.api.is_authenticated()
         {
             return;
@@ -2404,6 +2696,9 @@ impl App {
         let Some(track) = &self.queue.current else {
             return;
         };
+        if crate::local::path(&track.id).is_some() {
+            return;
+        }
         self.history_reported = true;
         let api = self.api.clone();
         let video_id = track.id.clone();
@@ -2464,7 +2759,7 @@ impl App {
         let Some(eligible_after) = crate::lastfm::eligible_after(duration) else {
             return;
         };
-        if self.position < eligible_after as f64 {
+        if self.listening.seconds < eligible_after as f64 {
             return;
         }
         let Some(started_at) = self.lastfm_started_at else {
@@ -2594,6 +2889,9 @@ impl App {
             task.abort();
             let _ = task.await;
         }
+        if let Some(task) = self.local_task.take() {
+            task.abort();
+        }
         if let Some(task) = self.cover_task.take() {
             task.abort();
             let _ = task.await;
@@ -2697,6 +2995,110 @@ mod tests {
         app.queue.upcoming.push_back(track("old"));
         app.playback = Playback::Playing;
         app
+    }
+
+    #[tokio::test]
+    async fn video_toggle_keeps_queue_position_pause_and_reporting_state() {
+        let mut app = populated_app().await;
+        app.position = 42.5;
+        app.playback = Playback::Paused;
+        app.lastfm_reported = true;
+        app.history_reported = true;
+        let generation = app.generation;
+        app.toggle_video();
+        assert!(app.player.video);
+        assert_eq!(app.video_resume, Some((42.5, true)));
+        assert_eq!(app.generation, generation + 1);
+        assert_eq!(app.queue.current.as_ref().unwrap().id, "playing");
+        assert_eq!(app.queue.upcoming.front().unwrap().id, "old");
+        app.on_player_event(app.generation, Event::Loaded);
+        assert_eq!(app.playback, Playback::Paused);
+        assert!(app.lastfm_reported && app.history_reported);
+        assert!(app.video_resume.is_none());
+        app.toggle_video();
+        assert!(!app.player.video && !app.player.local_video);
+        app.player.stop();
+        app.queue.current = Some(track("radio:https://example.org/live"));
+        let generation = app.generation;
+        app.toggle_video();
+        assert!(!app.player.video);
+        assert_eq!(app.generation, generation);
+    }
+
+    #[tokio::test]
+    async fn local_browser_filters_queues_refreshes_and_leaves_without_network_tasks() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("First.mp3"), b"audio").unwrap();
+        std::fs::write(root.path().join("Second.mp3"), b"audio").unwrap();
+        let mut app = App::new().await.unwrap();
+        app.config.local.include_downloads = false;
+        app.config.local.read_tags = false;
+        app.config.local.roots = vec![root.path().to_string_lossy().into()];
+        app.editing = false;
+        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while app.library_loading {
+                app.poll_local().await;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(app.local_focused && app.library_focused);
+        assert!(app.search_task.is_none() && app.library_task.is_none());
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.results.len(), 2);
+        app.execute(Action::QueueAll);
+        assert_eq!(app.queue.upcoming.len(), 2);
+        assert!(
+            app.queue
+                .upcoming
+                .iter()
+                .all(|t| crate::local::path(&t.id).is_some())
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.input = "second".into();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.results.len(), 1);
+        assert_eq!(app.results[0].title, "Second");
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(!app.local_focused && app.queue_focused);
+    }
+    #[tokio::test]
+    async fn local_cover_and_lyrics_are_read_from_sidecars() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("song.mp3");
+        std::fs::write(&path, b"audio").unwrap();
+        std::fs::write(path.with_extension("lrc"), "[00:01.00]Offline lyrics").unwrap();
+        image::RgbImage::new(2, 2)
+            .save(path.with_extension("jpg"))
+            .unwrap();
+        let mut app = App::new().await.unwrap();
+        app.queue.current = Some(Track {
+            id: format!("local:{}", path.display()),
+            title: "Song".into(),
+            artist: "Artist".into(),
+            album: String::new(),
+            duration: "1:00".into(),
+        });
+        app.request_cover();
+        app.request_lyrics();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while app.cover_loading || app.lyrics_loading {
+                app.poll_cover().await;
+                app.poll_lyrics().await;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(app.cover_art.is_some());
+        assert!(app.lyrics.as_ref().unwrap().has_synced());
+        let seed = app.queue.current.clone().unwrap();
+        app.start_radio(seed);
+        assert!(app.radio_task.is_none());
     }
 
     #[tokio::test]

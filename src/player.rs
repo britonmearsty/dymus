@@ -18,6 +18,7 @@ pub enum Event {
     Position(f64),
     Duration(f64),
     Paused(bool),
+    Seeking,
     Ended,
     Notice(String),
     Error(String),
@@ -31,6 +32,9 @@ pub struct Player {
     commands: Option<UnboundedSender<Value>>,
     task: Option<JoinHandle<()>>,
     preload_task: Option<JoinHandle<()>>,
+    pub local_video: bool,
+    pub video: bool,
+    pub video_height: u32,
 }
 
 impl Player {
@@ -42,18 +46,29 @@ impl Player {
             commands: None,
             task: None,
             preload_task: None,
+            local_video: false,
+            video: false,
+            video_height: 1080,
         }
     }
 
     pub fn play(&mut self, generation: u64, video_id: String, volume: u8) {
         self.stop();
         let sender = self.sender.clone();
+        let options = PlaybackOptions {
+            local_video: self.local_video,
+            video: self.video,
+            height: self.video_height,
+        };
         let (commands, receiver) = mpsc::unbounded_channel();
         self.commands = Some(commands);
         self.task = Some(tokio::spawn(async move {
             let result = async {
-                let source = resolve(&video_id).await?;
-                playback(&source, volume, false, generation, &sender, receiver).await
+                let source = resolve_playback(&video_id, options).await?;
+                playback(
+                    &source, volume, false, options, generation, &sender, receiver,
+                )
+                .await
             }
             .await;
             if let Err(error) = result {
@@ -73,10 +88,16 @@ impl Player {
             return;
         };
         let sender = self.sender.clone();
+        let options = PlaybackOptions {
+            local_video: self.local_video,
+            video: self.video,
+            height: self.video_height,
+        };
         self.preload_task = Some(tokio::spawn(async move {
-            match resolve(&video_id).await {
+            match resolve_playback(&video_id, options).await {
                 Ok(source) => {
-                    let _ = commands.send(json!(["loadfile", source, "append"]));
+                    let _ =
+                        commands.send(json!({"dymus_append": source.video, "audio": source.audio}));
                 }
                 Err(error) => {
                     let _ = sender.send((
@@ -127,6 +148,14 @@ impl Drop for Player {
 }
 
 pub async fn resolve(video_id: &str) -> Result<String> {
+    if let Some(path) = crate::local::path(video_id) {
+        ensure!(
+            path.is_absolute() && path.is_file(),
+            "Local media is missing: {}",
+            path.display()
+        );
+        return Ok(path.to_str().context("Local path is not UTF-8")?.to_owned());
+    }
     if let Some(stream_url) = video_id.strip_prefix("radio:") {
         anyhow::ensure!(
             stream_url.starts_with("https://") || stream_url.starts_with("http://"),
@@ -148,11 +177,17 @@ pub struct VideoSource {
 
 /// Prefer separate video within the height cap and audio; allow a combined fallback.
 pub async fn resolve_video(video_id: &str, height: u32) -> Result<VideoSource> {
+    if crate::local::path(video_id).is_some() {
+        return Ok(VideoSource {
+            video: resolve(video_id).await?,
+            audio: None,
+        });
+    }
     let urls = resolve_format(video_id, &video_format(height)).await?;
     video_source(urls)
 }
 
-fn video_format(height: u32) -> String {
+pub(crate) fn video_format(height: u32) -> String {
     format!("bestvideo[height<={height}]+bestaudio/best[height<={height}]")
 }
 
@@ -249,10 +284,29 @@ pub(crate) fn youtube_cookie_jar(cookie_header: &str) -> Result<tempfile::NamedT
     Ok(jar)
 }
 
+#[derive(Clone, Copy, Default)]
+struct PlaybackOptions {
+    local_video: bool,
+    video: bool,
+    height: u32,
+}
+
+async fn resolve_playback(id: &str, options: PlaybackOptions) -> Result<VideoSource> {
+    if options.video && !id.starts_with("radio:") {
+        resolve_video(id, options.height).await
+    } else {
+        Ok(VideoSource {
+            video: resolve(id).await?,
+            audio: None,
+        })
+    }
+}
+
 async fn playback(
-    source: &str,
+    source: &VideoSource,
     volume: u8,
     silent: bool,
+    options: PlaybackOptions,
     generation: u64,
     sender: &UnboundedSender<(u64, Event)>,
     mut commands: UnboundedReceiver<Value>,
@@ -277,6 +331,13 @@ async fn playback(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    command.args(["--autofit=640x360", "--ontop=no", "--title=Dymus video"]);
+    if let Some(audio) = &source.audio {
+        command.arg(format!("--audio-file={audio}"));
+    }
+    if options.video {
+        command.arg("--vid=auto");
+    }
     if silent {
         command.arg("--ao=null");
     }
@@ -301,7 +362,19 @@ async fn playback(
     for (id, property) in [(1, "time-pos"), (2, "duration"), (3, "pause")] {
         write_command(&mut write, json!(["observe_property", id, property])).await?;
     }
-    write_command(&mut write, json!(["loadfile", source, "replace"])).await?;
+    write_command(&mut write, json!(["get_property", "command-list"])).await?;
+    let mut has_index = true;
+    while let Some(line) = lines.next_line().await? {
+        let message: Value = serde_json::from_str(&line)?;
+        if message["data"].is_array() {
+            has_index = crate::headless::loadfile_has_index(&message["data"]);
+            break;
+        }
+        if message["event"].is_null() && message["error"] != "success" {
+            break;
+        }
+    }
+    write_command(&mut write, json!(["loadfile", source.video, "replace"])).await?;
     // A stuck stream must not leave the player showing "Loading" forever.
     let deadline = tokio::time::sleep(Duration::from_secs(30));
     tokio::pin!(deadline);
@@ -318,15 +391,33 @@ async fn playback(
             _ = &mut deadline, if !loaded => bail!("Audio stream did not start within 30 seconds"),
             command = commands.recv() => {
                 match command {
-                    Some(command) => write_command(&mut write, command).await?,
+                    Some(command) => {
+                        let command = if let Some(path) = command["dymus_append"].as_str() {
+                            let source = VideoSource { video: path.into(), audio: command["audio"].as_str().map(str::to_owned) };
+                            let mut command = crate::headless::append_command(&source, true, has_index, "Dymus video");
+                            command[2] = json!("append");
+                            command
+                        } else { command };
+                        write_command(&mut write, command).await?;
+                    },
                     None => { child.kill().await?; return Ok(()); }
                 }
             }
             line = lines.next_line() => {
                 let Some(line) = line.context("Cannot read mpv events")? else { bail!("mpv disconnected unexpectedly"); };
                 let message: Value = serde_json::from_str(&line).context("Invalid mpv event")?;
+                if options.local_video && !options.video && message["event"] == "file-loaded" {
+                    write_command(&mut write, json!(["get_property", "path"])).await?;
+                }
+                // get_property responses from this connection carry no event.
+                if options.local_video && !options.video && message["event"].is_null() && message["error"] == "success"
+                    && let Some(path) = message["data"].as_str() {
+                    let path = std::path::Path::new(path);
+                    write_command(&mut write, json!(["set_property", "vid", if path.is_absolute() && crate::local::is_video(path) { "auto" } else { "no" }])).await?;
+                }
                 let event = match message["event"].as_str() {
                     Some("file-loaded") => { loaded = true; Some(Event::Loaded) }
+                    Some("seek" | "playback-restart") => Some(Event::Seeking),
                     Some("property-change") => match message["name"].as_str() {
                         Some("time-pos") => message["data"].as_f64().map(Event::Position),
                         Some("duration") => message["data"].as_f64().map(Event::Duration),
@@ -477,6 +568,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_resolution_is_direct_and_missing_files_fail_without_extraction() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("音楽 space.mp3");
+        std::fs::write(&path, b"audio").unwrap();
+        let id = format!("local:{}", path.display());
+        assert_eq!(resolve(&id).await.unwrap(), path.to_str().unwrap());
+        assert_eq!(
+            resolve_video(&id, 1080).await.unwrap().video,
+            path.to_str().unwrap()
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            resolve(&id)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Local media is missing")
+        );
+    }
+
+    #[tokio::test]
     async fn radio_streams_skip_youtube_resolution() {
         let source = resolve("radio:https://stream.example/live").await.unwrap();
         assert_eq!(source, "https://stream.example/live");
@@ -499,7 +611,19 @@ mod tests {
         let source = resolve(&track.id).await.unwrap();
         let (sender, mut events) = mpsc::unbounded_channel();
         let (_commands, receiver) = mpsc::unbounded_channel();
-        let playback = playback(&source, 0, true, 1, &sender, receiver);
+        let source = VideoSource {
+            video: source,
+            audio: None,
+        };
+        let playback = playback(
+            &source,
+            0,
+            true,
+            PlaybackOptions::default(),
+            1,
+            &sender,
+            receiver,
+        );
         tokio::pin!(playback);
         tokio::time::timeout(Duration::from_secs(40), async {
             loop {
@@ -546,7 +670,18 @@ mod tests {
         let (_commands, receiver) = mpsc::unbounded_channel();
         tokio::time::timeout(
             Duration::from_secs(10),
-            playback(path.to_str().unwrap(), 0, true, 7, &sender, receiver),
+            playback(
+                &VideoSource {
+                    video: path.to_string_lossy().into_owned(),
+                    audio: None,
+                },
+                0,
+                true,
+                PlaybackOptions::default(),
+                7,
+                &sender,
+                receiver,
+            ),
         )
         .await
         .unwrap()

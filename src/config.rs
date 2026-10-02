@@ -16,7 +16,7 @@ pub struct Config {
     pub headless_results: usize,
     /// Number of full YouTube matches shown by headless search (1 to 50).
     pub headless_search_results: usize,
-    /// Maximum headless video height in pixels (144 to 4320).
+    /// Maximum video height in pixels (144 to 4320).
     pub video_height: u32,
     /// Send authenticated playback history after the configured listen threshold.
     pub report_history: bool,
@@ -24,6 +24,8 @@ pub struct Config {
     pub report_history_after_seconds: u64,
     /// Submit eligible plays to Last.fm when credentials are configured.
     pub lastfm_scrobbling: bool,
+    pub downloads: DownloadConfig,
+    pub local: LocalConfig,
     pub colors: Colors,
     pub keybindings: KeyBindings,
 }
@@ -39,8 +41,95 @@ impl Default for Config {
             report_history: false,
             report_history_after_seconds: 30,
             lastfm_scrobbling: true,
+            downloads: DownloadConfig::default(),
+            local: LocalConfig::default(),
             colors: Colors::default(),
             keybindings: KeyBindings::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LocalConfig {
+    pub roots: Vec<String>,
+    pub include_downloads: bool,
+    pub scan_unindexed: bool,
+    pub recursive: bool,
+    pub read_tags: bool,
+    pub video: bool,
+}
+impl Default for LocalConfig {
+    fn default() -> Self {
+        Self {
+            roots: Vec::new(),
+            include_downloads: true,
+            scan_unindexed: true,
+            recursive: true,
+            read_tags: true,
+            video: true,
+        }
+    }
+}
+
+/// Headless download settings. Keep media-specific defaults separate from streaming.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DownloadConfig {
+    pub audio_path: String,
+    pub video_path: String,
+    pub filename: String,
+    pub audio_format: String,
+    pub audio_quality: String,
+    pub video_format: String,
+    pub video_height: Option<u32>,
+    pub organize_by_type: bool,
+    pub write_manifest: bool,
+    pub write_playlist: bool,
+    pub write_thumbnail: bool,
+    pub playlist_subdirectories: bool,
+    pub number_tracks: bool,
+    pub embed_metadata: bool,
+    pub embed_thumbnail: bool,
+    pub resume: bool,
+    pub overwrite: bool,
+    pub skip_downloaded: bool,
+    pub continue_on_error: bool,
+    pub progress: bool,
+    pub retries: u8,
+    pub fragment_retries: u8,
+    pub concurrent_fragments: u8,
+    pub socket_timeout: u16,
+    pub rate_limit: Option<String>,
+}
+impl Default for DownloadConfig {
+    fn default() -> Self {
+        Self {
+            audio_path: "~/Music/Dymus".into(),
+            video_path: "~/Videos/Dymus".into(),
+            filename: "%(title)s [%(id)s].%(ext)s".into(),
+            audio_format: "best".into(),
+            audio_quality: "0".into(),
+            video_format: "mp4".into(),
+            video_height: None,
+            organize_by_type: true,
+            write_manifest: true,
+            write_playlist: true,
+            write_thumbnail: true,
+            playlist_subdirectories: true,
+            number_tracks: true,
+            embed_metadata: true,
+            embed_thumbnail: false,
+            resume: true,
+            overwrite: false,
+            skip_downloaded: false,
+            continue_on_error: true,
+            progress: true,
+            retries: 10,
+            fragment_retries: 10,
+            concurrent_fragments: 4,
+            socket_timeout: 30,
+            rate_limit: None,
         }
     }
 }
@@ -79,9 +168,11 @@ pub struct KeyBindings {
     pub artists: String,
     pub podcasts: String,
     pub radio: String,
+    pub local: String,
     pub queue: String,
     pub now_playing: String,
     pub pause: String,
+    pub video: String,
     pub next_track: String,
     pub retry_track: String,
     pub volume_up: String,
@@ -102,9 +193,11 @@ impl Default for KeyBindings {
             artists: "3".into(),
             podcasts: "4".into(),
             radio: "o".into(),
+            local: "5".into(),
             queue: "Tab".into(),
             now_playing: "t".into(),
             pause: "Space".into(),
+            video: "V".into(),
             next_track: "n".into(),
             retry_track: "r".into(),
             volume_up: "+".into(),
@@ -127,9 +220,11 @@ impl KeyBindings {
             "artists" => &self.artists,
             "podcasts" => &self.podcasts,
             "radio" => &self.radio,
+            "local" => &self.local,
             "queue" => &self.queue,
             "now_playing" => &self.now_playing,
             "pause" => &self.pause,
+            "video" => &self.video,
             "next_track" => &self.next_track,
             "retry_track" => &self.retry_track,
             "volume_up" => &self.volume_up,
@@ -159,6 +254,7 @@ pub const START_VIEWS: &[&str] = &[
     "artists",
     "podcasts",
     "radio",
+    "local",
     "search",
     "queue",
 ];
@@ -242,7 +338,7 @@ impl Config {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Cannot create {}", parent.display()))?;
             let body = format!(
-                "# Dymus user configuration.\n# Available themes: tokyo-night, catppuccin-mocha, gruvbox-dark, nord.\n# Start view: home, explore, playlists, albums, artists, podcasts, radio, search, or queue.\n# Headless picker results: 1 through 25.\n# YouTube Music history reporting is off by default; threshold: 1 through 3600 seconds.\n# Last.fm scrobbling is on by default when Last.fm credentials exist.\n# Colors are optional six-digit hex overrides (examples below use Tokyo Night).\n# Uncomment and edit any value:\n# [colors]\n# text = \"#c0caf5\"\n# secondary = \"#a9b1d6\"\n# muted = \"#737aa2\"\n# accent = \"#7aa2f7\"\n# good = \"#9ece6a\"\n# warning = \"#e0af68\"\n# error = \"#f7768e\"\n\n{}",
+                "# Dymus user configuration.\n# Available themes: tokyo-night, catppuccin-mocha, gruvbox-dark, nord.\n# Start view: home, explore, playlists, albums, artists, podcasts, radio, local, search, or queue.\n# Headless picker results: 1 through 25.\n# YouTube Music history reporting is off by default; threshold: 1 through 3600 seconds.\n# Last.fm scrobbling is on by default when Last.fm credentials exist.\n# Colors are optional six-digit hex overrides (examples below use Tokyo Night).\n# Uncomment and edit any value:\n# [colors]\n# text = \"#c0caf5\"\n# secondary = \"#a9b1d6\"\n# muted = \"#737aa2\"\n# accent = \"#7aa2f7\"\n# good = \"#9ece6a\"\n# warning = \"#e0af68\"\n# error = \"#f7768e\"\n\n{}",
                 toml::to_string_pretty(self)?
             );
             fs::write(&path, body).with_context(|| format!("Cannot write {}", path.display()))
@@ -300,6 +396,37 @@ pub fn config_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn download_defaults_are_local_library_ready_without_configuration() {
+        let config: Config = toml::from_str("").unwrap();
+        let defaults = &config.downloads;
+        assert_eq!(defaults.audio_path, "~/Music/Dymus");
+        assert_eq!(defaults.video_path, "~/Videos/Dymus");
+        assert!(
+            defaults.organize_by_type
+                && defaults.write_manifest
+                && defaults.write_playlist
+                && defaults.write_thumbnail
+        );
+        assert!(
+            defaults.number_tracks && defaults.playlist_subdirectories && defaults.embed_metadata
+        );
+        assert!(!defaults.overwrite && !defaults.skip_downloaded);
+    }
+
+    #[test]
+    fn partial_download_config_preserves_defaults_and_round_trips() {
+        let config: Config = toml::from_str("[downloads]\naudio_path = '/tmp/music'\naudio_format = 'flac'\nvideo_height = 720\nrate_limit = '2M'").unwrap();
+        assert_eq!(config.downloads.audio_path, "/tmp/music");
+        assert_eq!(config.downloads.audio_format, "flac");
+        assert_eq!(config.downloads.video_height, Some(720));
+        assert!(config.downloads.resume);
+        let encoded = toml::to_string_pretty(&config).unwrap();
+        let decoded: Config = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.downloads.rate_limit.as_deref(), Some("2M"));
+        assert_eq!(Config::default().downloads.audio_format, "best");
+    }
+
     #[test]
     fn youtube_search_cap_is_independent_and_normalized() {
         let mut config: Config =

@@ -7,10 +7,7 @@ use crate::{
     player,
 };
 use anyhow::{Context, Result, bail, ensure};
-use crossterm::{
-    style::{Color, Stylize},
-    terminal,
-};
+use crossterm::terminal;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::os::unix::process::CommandExt;
@@ -112,7 +109,12 @@ async fn resolve_source(id: &str, video: bool, height: u32) -> Result<player::Vi
     }
 }
 
-fn append_command(source: &player::VideoSource, video: bool, has_index: bool, tag: &str) -> Value {
+pub(crate) fn append_command(
+    source: &player::VideoSource,
+    video: bool,
+    has_index: bool,
+    tag: &str,
+) -> Value {
     // Replace external audio for each entry, including combined-stream fallback.
     // mpv audio-files is a colon-separated path list on Linux.
     let audio = source
@@ -132,7 +134,7 @@ fn append_command(source: &player::VideoSource, video: bool, has_index: bool, ta
     Value::Array(command)
 }
 
-fn loadfile_has_index(commands: &Value) -> bool {
+pub(crate) fn loadfile_has_index(commands: &Value) -> bool {
     commands
         .as_array()
         .into_iter()
@@ -168,6 +170,93 @@ async fn choose_youtube(query: &str, limit: Option<usize>, flow: &mut Flow) -> R
             headless_ui::clean(&track.artist)
         )
     })
+}
+
+pub async fn play_local(
+    query: &str,
+    path: Option<PathBuf>,
+    id: Option<&str>,
+    all: bool,
+    detach: bool,
+    volume: u8,
+    video: bool,
+) -> Result<()> {
+    ensure!(volume <= 100, "Volume must be between 0 and 100");
+    let explicit = path.is_some() || Path::new(query).exists();
+    let path = path.or_else(|| Path::new(query).exists().then(|| PathBuf::from(query)));
+    let filter = if Path::new(query).exists() { "" } else { query };
+    let mut flow = Flow::new(
+        "Local playback",
+        "Offline files · downloaded and imported collections",
+    );
+    let library = flow
+        .load(
+            "Read local library",
+            "Read metadata and available local files",
+            crate::local::load(Config::load()?, path),
+        )
+        .await?
+        .filtered(filter);
+    for warning in &library.warnings {
+        eprintln!("{warning}");
+    }
+    let mut collections = library
+        .collections
+        .into_iter()
+        .filter(|c| !c.tracks.is_empty() && id.is_none_or(|id| c.id == id))
+        .collect::<Vec<_>>();
+    ensure!(
+        !collections.is_empty(),
+        "No playable local content found; download media or configure [local].roots (use `dymus local --json` to list collection IDs)"
+    );
+    let tracks = if all {
+        collections.into_iter().flat_map(|c| c.tracks).collect()
+    } else {
+        let collection =
+            if collections.len() == 1 && (explicit || id.is_some() || !io::stdin().is_terminal()) {
+                collections.remove(0)
+            } else {
+                flow.choose("Choose a local collection", &collections, |c| {
+                    let missing = if c.missing > 0 {
+                        format!(" · {} missing", c.missing)
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        "{}\n{} tracks · {}{missing}",
+                        c.title,
+                        c.tracks.len(),
+                        c.media_type
+                    )
+                })?
+            };
+        if explicit || id.is_some() || !io::stdin().is_terminal() || collection.tracks.len() == 1 {
+            collection.tracks
+        } else {
+            let choices = std::iter::once(None)
+                .chain((0..collection.tracks.len()).map(Some))
+                .collect::<Vec<_>>();
+            let selected =
+                flow.choose(
+                    "Play collection or choose a track",
+                    &choices,
+                    |index| match index {
+                        None => format!("Entire collection · {} tracks", collection.tracks.len()),
+                        Some(index) => format!(
+                            "{}\n{} · {}",
+                            collection.tracks[*index].title,
+                            collection.tracks[*index].artist,
+                            collection.tracks[*index].duration
+                        ),
+                    },
+                )?;
+            match selected {
+                None => collection.tracks,
+                Some(index) => vec![collection.tracks[index].clone()],
+            }
+        }
+    };
+    play_tracks(tracks, video, detach, volume, &mut flow).await
 }
 
 pub async fn play(
@@ -316,19 +405,99 @@ async fn play_tracks(
         child.stop_on_drop = false;
         return Ok(());
     }
-    if let Err(error) = display_progress(&socket, &tracks).await {
+    if let Err(error) = display_progress(&socket, &tracks, video, volume).await {
         eprintln!("Progress display stopped: {error:#}");
     }
     let status = child.wait().await.context("Cannot wait for mpv")?;
     if !status.success() {
         bail!("mpv exited with {status}");
     }
-    println!("Playback finished.");
+    println!("  playback ended\n");
     Ok(())
 }
 
+#[derive(Default)]
+struct ProgressState {
+    position: Option<f64>,
+    duration: Option<f64>,
+    paused: bool,
+    volume: Option<u8>,
+    track_index: usize,
+    tagged: bool,
+}
+
+impl ProgressState {
+    fn event(&mut self, event: &Value) -> bool {
+        if event["event"] == "start-file" {
+            self.position = None;
+            self.duration = None;
+            return true;
+        }
+        if event["request_id"] == 100 && event["error"] == "success" {
+            if let Some(duration) = valid_duration(event["data"].as_f64()) {
+                self.duration = Some(duration);
+            }
+            return true;
+        }
+        if event["event"] != "property-change" {
+            return false;
+        }
+        match event["name"].as_str() {
+            Some("time-pos") => self.position = event["data"].as_f64(),
+            Some("duration") => self.duration = valid_duration(event["data"].as_f64()),
+            Some("volume") => {
+                self.volume = event["data"]
+                    .as_f64()
+                    .filter(|value| value.is_finite())
+                    .map(|value| value.clamp(0.0, 100.0).round() as u8)
+            }
+            Some("pause") => self.paused = event["data"].as_bool().unwrap_or(false),
+            // Identity notifications can follow the initial duration snapshot.
+            // Only start-file marks a new playback timeline.
+            Some("media-title") => {
+                if let Some(index) = event["data"]
+                    .as_str()
+                    .and_then(crate::headless_service::track_index)
+                {
+                    self.tagged = true;
+                    self.track_index = index;
+                }
+            }
+            Some("playlist-pos") if !self.tagged => {
+                self.track_index = event["data"].as_u64().unwrap_or_default() as usize;
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn duration(&self, tracks: &[Track]) -> Option<f64> {
+        valid_duration(self.duration).or_else(|| {
+            tracks
+                .get(self.track_index)
+                .map(crate::lastfm::duration_seconds)
+                .and_then(|seconds| valid_duration(Some(seconds as f64)))
+        })
+    }
+}
+
+fn valid_duration(duration: Option<f64>) -> Option<f64> {
+    duration.filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+}
+
+fn duration_clock(duration: Option<f64>) -> String {
+    valid_duration(duration)
+        .map(|seconds| clock(Some(seconds)))
+        .unwrap_or_else(|| "--:--".into())
+}
+
 /// Renders a single, continually updated line for attached headless playback.
-async fn display_progress(socket_path: &Path, tracks: &[Track]) -> Result<()> {
+async fn display_progress(
+    socket_path: &Path,
+    tracks: &[Track],
+    video: bool,
+    volume: u8,
+) -> Result<()> {
     if !io::stdout().is_terminal() {
         return Ok(());
     }
@@ -342,6 +511,7 @@ async fn display_progress(socket_path: &Path, tracks: &[Track]) -> Result<()> {
         (3, "pause"),
         (4, "playlist-pos"),
         (5, "media-title"),
+        (6, "volume"),
     ] {
         write
             .write_all(
@@ -354,11 +524,8 @@ async fn display_progress(socket_path: &Path, tracks: &[Track]) -> Result<()> {
             .await?;
     }
     let mut lines = BufReader::new(read).lines();
-    let mut position = None;
-    let mut duration = None;
-    let mut paused = false;
-    let mut track_index = 0;
-    let mut tagged = false;
+    let mut progress = ProgressState::default();
+    let mut block = headless_ui::Block::default();
     let mut refresh = tokio::time::interval_at(
         Instant::now() + Duration::from_millis(100),
         Duration::from_secs(1),
@@ -375,38 +542,34 @@ async fn display_progress(socket_path: &Path, tracks: &[Track]) -> Result<()> {
                 let Some(line) = line? else { break };
                 let event: Value = serde_json::from_str(&line)
                     .context("Invalid progress event from mpv")?;
-                if event["event"] != "property-change" {
-                    continue;
+                if event["event"] == "file-loaded" {
+                    write.write_all(format!("{}\n", json!({"command":["get_property", "duration"], "request_id":100})).as_bytes()).await?;
                 }
-                match event["name"].as_str() {
-                    Some("time-pos") => position = event["data"].as_f64(),
-                    Some("duration") => duration = event["data"].as_f64(),
-                    Some("pause") => paused = event["data"].as_bool().unwrap_or(false),
-                    Some("media-title") => {
-                        if let Some(index) = event["data"].as_str().and_then(crate::headless_service::track_index) {
-                            tagged = true; track_index = index; position = None; duration = None;
-                        }
-                    }
-                    Some("playlist-pos") if !tagged => {
-                        track_index = event["data"].as_u64().unwrap_or_default() as usize;
-                        position = None;
-                        duration = None;
-                    }
-                    _ => continue,
-                }
+                if !progress.event(&event) { continue; }
                 changed = true;
             }
             _ = refresh.tick(), if changed => {
-                let label = tracks
-                    .get(track_index)
-                    .map(|track| format!("{} — {}", track.title, track.artist))
-                    .unwrap_or_else(|| "Unknown track".into());
-                let width = terminal::size().map(|(width, _)| usize::from(width)).unwrap_or(80);
-                let line = progress_line(&label, paused, position, duration, width);
-                print!("\r\x1b[2K{}", line.with(Color::White));
-                io::stdout()
-                    .flush()
-                    .context("Cannot update playback progress")?;
+                let track = tracks.get(progress.track_index);
+                let view = headless_ui::PlaybackView {
+                    title: track.map(|track| track.title.as_str()).unwrap_or("Unknown track"),
+                    artist: track.map(|track| track.artist.as_str()).unwrap_or_default(),
+                    position: progress.position,
+                    duration: progress.duration(tracks),
+                    paused: progress.paused,
+                    video,
+                    index: progress.track_index,
+                    total: tracks.len(),
+                    volume: progress.volume.unwrap_or(volume),
+                };
+                let (width, height) = terminal::size().unwrap_or((80, 24));
+                if height < 10 {
+                    let label = format!("{} — {}", view.title, view.artist);
+                    let line = progress_line(&label, view.paused, view.position, view.duration, usize::from(width));
+                    print!("\r\x1b[2K{}", headless_ui::fit(&line, usize::from(width).saturating_sub(1)));
+                    io::stdout().flush()?;
+                } else {
+                    block.draw(&headless_ui::playback_rows(&view, headless_ui::width()))?;
+                }
                 changed = false;
             }
         }
@@ -500,7 +663,11 @@ pub async fn control(action: Control) -> Result<()> {
     Ok(())
 }
 
-async fn resolve_target(target: Target, query: &str, flow: &mut Flow) -> Result<Vec<Track>> {
+pub(crate) async fn resolve_target(
+    target: Target,
+    query: &str,
+    flow: &mut Flow,
+) -> Result<Vec<Track>> {
     if matches!(target, Target::Song) {
         return Ok(vec![choose_youtube(query, None, flow).await?]);
     }
@@ -508,28 +675,26 @@ async fn resolve_target(target: Target, query: &str, flow: &mut Flow) -> Result<
     let api = InnerTube::configured()?;
     match target {
         Target::Song => unreachable!("handled by YouTube search above"),
-        Target::Album => {
-            collection_tracks(
-                &api,
-                query,
-                SearchFilter::Albums,
-                "album",
-                result_limit,
-                flow,
-            )
-            .await
-        }
-        Target::Playlist => {
-            collection_tracks(
-                &api,
-                query,
-                SearchFilter::Playlists,
-                "playlist",
-                result_limit,
-                flow,
-            )
-            .await
-        }
+        Target::Album => collection_tracks(
+            &api,
+            query,
+            SearchFilter::Albums,
+            "album",
+            result_limit,
+            flow,
+        )
+        .await
+        .map(|selection| selection.tracks),
+        Target::Playlist => collection_tracks(
+            &api,
+            query,
+            SearchFilter::Playlists,
+            "playlist",
+            result_limit,
+            flow,
+        )
+        .await
+        .map(|selection| selection.tracks),
         Target::Library(kind) => library_item_tracks(&api, kind, result_limit, flow).await,
     }
 }
@@ -567,9 +732,7 @@ async fn library_item_tracks(
             )
         }
     })?;
-    flow.load("Load tracks", &item.title, api.library_tracks(&item))
-        .await
-        .map(|page| page.tracks)
+    load_collection_tracks(api, &item, flow).await
 }
 
 fn library_label(kind: LibraryKind) -> &'static str {
@@ -581,6 +744,41 @@ fn library_label(kind: LibraryKind) -> &'static str {
     }
 }
 
+pub(crate) struct DownloadSelection {
+    pub tracks: Vec<Track>,
+    pub title: String,
+    pub id: String,
+}
+
+pub(crate) async fn resolve_download_target(
+    target: Target,
+    query: &str,
+    flow: &mut Flow,
+) -> Result<DownloadSelection> {
+    if matches!(target, Target::Song) {
+        return Ok(DownloadSelection {
+            tracks: vec![choose_youtube(query, None, flow).await?],
+            title: "Singles".into(),
+            id: "singles".into(),
+        });
+    }
+    let api = InnerTube::configured()?;
+    let (filter, label) = if matches!(target, Target::Album) {
+        (SearchFilter::Albums, "album")
+    } else {
+        (SearchFilter::Playlists, "playlist")
+    };
+    collection_tracks(
+        &api,
+        query,
+        filter,
+        label,
+        Config::load()?.headless_results,
+        flow,
+    )
+    .await
+}
+
 async fn collection_tracks(
     api: &InnerTube,
     query: &str,
@@ -588,7 +786,7 @@ async fn collection_tracks(
     label: &str,
     result_limit: usize,
     flow: &mut Flow,
-) -> Result<Vec<Track>> {
+) -> Result<DownloadSelection> {
     let items = flow
         .load(
             &format!("Search {label}s"),
@@ -613,9 +811,38 @@ async fn collection_tracks(
             )
         }
     })?;
-    flow.load("Load tracks", &item.title, api.library_tracks(&item))
-        .await
-        .map(|page| page.tracks)
+    let tracks = load_collection_tracks(api, &item, flow).await?;
+    Ok(DownloadSelection {
+        tracks,
+        title: item.title,
+        id: if item.playlist_id.is_empty() {
+            item.browse_id
+        } else {
+            item.playlist_id
+        },
+    })
+}
+
+async fn load_collection_tracks(
+    api: &InnerTube,
+    item: &crate::innertube::LibraryItem,
+    flow: &mut Flow,
+) -> Result<Vec<Track>> {
+    flow.load("Load all tracks", &item.title, async {
+        let mut page = api.library_tracks(item).await?;
+        let mut tracks = page.tracks;
+        let mut seen = std::collections::HashSet::new();
+        while let Some(token) = page.continuation {
+            ensure!(
+                seen.insert(token.clone()),
+                "Collection pagination repeated a token"
+            );
+            page = api.library_tracks_more(&token).await?;
+            tracks.extend(page.tracks);
+        }
+        Ok(tracks)
+    })
+    .await
 }
 
 fn truncate(value: &str, width: usize) -> String {
@@ -771,16 +998,51 @@ async fn print_status(socket: &mut UnixStream, state_path: &Path) -> Result<()> 
     let position = command(socket, json!(["get_property", "time-pos"])).await?;
     let duration = command(socket, json!(["get_property", "duration"])).await?;
     let index = command(socket, json!(["get_property", "playlist-pos"])).await?;
-    let track = fs::read(state_path)
+    let state = fs::read(state_path)
         .ok()
-        .and_then(|body| serde_json::from_slice::<State>(&body).ok())
-        .and_then(|state| {
-            title
-                .as_str()
-                .and_then(crate::headless_service::track_index)
-                .or_else(|| index.as_u64().map(|index| index as usize))
-                .and_then(|index| state.tracks.get(index).cloned())
-        });
+        .and_then(|body| serde_json::from_slice::<State>(&body).ok());
+    let index = title
+        .as_str()
+        .and_then(crate::headless_service::track_index)
+        .or_else(|| index.as_u64().map(|index| index as usize))
+        .unwrap_or_default();
+    let track = state
+        .as_ref()
+        .and_then(|state| state.tracks.get(index))
+        .cloned();
+    let duration = valid_duration(duration.as_f64()).or_else(|| {
+        track
+            .as_ref()
+            .map(crate::lastfm::duration_seconds)
+            .and_then(|seconds| valid_duration(Some(seconds as f64)))
+    });
+    if io::stdout().is_terminal() {
+        let volume = command(socket, json!(["get_property", "volume"])).await?;
+        let mut flow = Flow::new("Playback", "");
+        flow.snapshot(&headless_ui::PlaybackView {
+            title: track
+                .as_ref()
+                .map(|track| track.title.as_str())
+                .unwrap_or_else(|| title.as_str().unwrap_or("Unknown track")),
+            artist: track
+                .as_ref()
+                .map(|track| track.artist.as_str())
+                .unwrap_or_default(),
+            position: position.as_f64(),
+            duration,
+            paused: paused.as_bool().unwrap_or(false),
+            video: state.as_ref().is_some_and(|state| state.video),
+            index,
+            total: state.as_ref().map(|state| state.tracks.len()).unwrap_or(1),
+            volume: volume
+                .as_f64()
+                .unwrap_or_default()
+                .clamp(0.0, 100.0)
+                .round() as u8,
+        })?;
+        println!();
+        return Ok(());
+    }
     if let Some(track) = track {
         println!("{} — {}", track.title, track.artist);
     } else {
@@ -794,7 +1056,7 @@ async fn print_status(socket: &mut UnixStream, state_path: &Path) -> Result<()> 
             "playing"
         },
         clock(position.as_f64()),
-        clock(duration.as_f64())
+        duration_clock(duration)
     );
     Ok(())
 }
@@ -814,7 +1076,7 @@ fn progress_line(
 ) -> String {
     let available = width.saturating_sub(1);
     let status = if paused { "Ⅱ" } else { "▶" };
-    let time = format!("· {} / {}", clock(position), clock(duration));
+    let time = format!("· {} / {}", clock(position), duration_clock(duration));
     let fixed = format!("{status}  {time}");
     let label: String = label
         .chars()
@@ -830,6 +1092,39 @@ fn progress_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_keeps_duration_when_identity_arrives_after_snapshot() {
+        let mut progress = ProgressState::default();
+        for event in [
+            json!({"event":"property-change","name":"duration","data":125}),
+            json!({"event":"property-change","name":"time-pos","data":52}),
+            json!({"event":"property-change","name":"playlist-pos","data":0}),
+            json!({"event":"property-change","name":"media-title","data":"dymus-track-0"}),
+        ] {
+            assert!(progress.event(&event));
+        }
+        assert_eq!(progress.duration(&[]), Some(125.0));
+        assert_eq!(progress.position, Some(52.0));
+        progress.event(&json!({"event":"start-file"}));
+        assert_eq!(progress.duration(&[]), None);
+        assert_eq!(progress.position, None);
+        progress.event(&json!({"request_id":100,"error":"success","data":125}));
+        assert_eq!(progress.duration(&[]), Some(125.0));
+    }
+
+    #[test]
+    fn progress_falls_back_to_metadata_and_distinguishes_unknown_duration() {
+        let mut track = crate::model::track("test");
+        track.duration = "3:24".into();
+        let mut progress = ProgressState::default();
+        assert_eq!(progress.duration(std::slice::from_ref(&track)), Some(204.0));
+        progress.duration = Some(220.0);
+        assert_eq!(progress.duration(&[track]), Some(220.0));
+        for duration in [None, Some(0.0), Some(-1.0), Some(f64::NAN)] {
+            assert_eq!(duration_clock(duration), "--:--");
+        }
+    }
 
     #[test]
     fn persisted_playback_mode_defaults_to_audio_for_old_state() {

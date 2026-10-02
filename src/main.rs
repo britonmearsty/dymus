@@ -2,11 +2,14 @@ mod app;
 mod auth;
 mod cache;
 mod config;
+mod download;
+mod download_library;
 mod headless;
 mod headless_service;
 mod headless_ui;
 mod innertube;
 mod lastfm;
+mod local;
 mod lyrics;
 mod model;
 mod mpris;
@@ -18,6 +21,7 @@ mod youtube;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
+use config::Config;
 use crossterm::style::{Color, Stylize};
 use std::{io::IsTerminal, time::Duration};
 
@@ -47,13 +51,13 @@ enum Command {
         #[arg(long, default_value_t = 80)]
         volume: u8,
     },
-    /// Check playback and optional visualizer dependencies.
+    /// Check playback, download, and optional visualizer dependencies.
     Doctor,
     /// Play a song, album, or playlist without starting the TUI.
     Play {
         #[command(subcommand)]
         target: PlayTarget,
-        /// Stream video up to the configured video_height, for every track.
+        /// Play video for every track (streaming uses the configured height cap).
         #[arg(long, global = true)]
         video: bool,
         /// Leave playback running after this command exits.
@@ -62,6 +66,25 @@ enum Command {
         /// Initial playback volume, from 0 to 100.
         #[arg(long, global = true, default_value_t = 80)]
         volume: u8,
+    },
+    /// Download audio or video without starting the TUI.
+    Download {
+        #[command(subcommand)]
+        target: DownloadTarget,
+        /// Download video for every selected track instead of audio.
+        #[arg(long, global = true)]
+        video: bool,
+        /// Override the configured destination directory.
+        #[arg(long, global = true)]
+        path: Option<std::path::PathBuf>,
+    },
+    /// List local collections and tracks, optionally as JSON.
+    Local {
+        query: Option<String>,
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
     },
     /// Control a detached headless player.
     Control {
@@ -97,11 +120,34 @@ enum PlayTarget {
     Playlist {
         query: String,
     },
+    /// Play downloaded or imported local media, directories, or M3U playlists.
+    Local {
+        query: Option<String>,
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
+        #[arg(long)]
+        id: Option<String>,
+        /// Queue all matching local tracks without prompting.
+        #[arg(long)]
+        all: bool,
+    },
     /// Choose an item from a signed-in YouTube Music library category.
     Library {
         #[command(subcommand)]
         kind: LibraryTarget,
     },
+}
+
+#[derive(Subcommand)]
+enum DownloadTarget {
+    /// Find a song or download a direct YouTube URL as audio.
+    Song { query: String },
+    /// Find a video or download a direct YouTube URL.
+    Video { query: String },
+    /// Choose an album or download its direct playlist URL.
+    Album { query: String },
+    /// Choose a playlist or download its direct URL.
+    Playlist { query: String },
 }
 
 #[derive(Subcommand)]
@@ -152,14 +198,17 @@ enum LastFmCommand {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     // The background worker handles asynchronous I/O and needs no CPU-sized pool.
-    let mut runtime = if matches!(&cli.command, Some(Command::HeadlessResolve { .. })) {
+    let mut runtime = if matches!(
+        &cli.command,
+        Some(Command::HeadlessResolve { .. } | Command::Download { .. })
+    ) {
         tokio::runtime::Builder::new_current_thread()
     } else {
         tokio::runtime::Builder::new_multi_thread()
     };
     match runtime.enable_all().build()?.block_on(run(cli)) {
         Err(error) if error.is::<headless_ui::Cancelled>() => {
-            println!("Cancelled. No new playback started.");
+            println!("Cancelled.");
             Ok(())
         }
         result => result,
@@ -187,6 +236,44 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Some(Command::Doctor) => doctor().await?,
+        Some(Command::Download {
+            target,
+            video,
+            path,
+        }) => {
+            let (target, query, video) = match target {
+                DownloadTarget::Song { query } => (headless::Target::Song, query, video),
+                DownloadTarget::Video { query } => (headless::Target::Song, query, true),
+                DownloadTarget::Album { query } => (headless::Target::Album, query, video),
+                DownloadTarget::Playlist { query } => (headless::Target::Playlist, query, video),
+            };
+            download::run(target, &query, video, path.as_deref()).await?;
+        }
+        Some(Command::Local { query, path, json }) => {
+            let library = local::load(Config::load()?, path)
+                .await?
+                .filtered(query.as_deref().unwrap_or(""));
+            if json {
+                println!("{}", serde_json::to_string_pretty(&library)?);
+            } else {
+                for collection in &library.collections {
+                    println!(
+                        "{} · {} · {} track(s) · {}\n  id: {}",
+                        collection.title,
+                        collection.kind,
+                        collection.tracks.len(),
+                        collection.media_type,
+                        collection.id
+                    );
+                    for track in &collection.tracks {
+                        println!("  {} — {}", track.title, track.artist);
+                    }
+                }
+                for warning in &library.warnings {
+                    eprintln!("{warning}");
+                }
+            }
+        }
         Some(Command::Play {
             target,
             video,
@@ -194,6 +281,24 @@ async fn run(cli: Cli) -> Result<()> {
             volume,
         }) => {
             let target = match target {
+                PlayTarget::Local {
+                    query,
+                    path,
+                    id,
+                    all,
+                } => {
+                    headless::play_local(
+                        query.as_deref().unwrap_or(""),
+                        path,
+                        id.as_deref(),
+                        all,
+                        detach,
+                        volume,
+                        video,
+                    )
+                    .await?;
+                    return Ok(());
+                }
                 PlayTarget::Song { query } => (headless::Target::Song, query),
                 PlayTarget::Album { query } => (headless::Target::Album, query),
                 PlayTarget::Playlist { query } => (headless::Target::Playlist, query),
@@ -364,6 +469,24 @@ async fn doctor() -> Result<()> {
                 .unwrap_or("available")
         ));
     }
+    for program in ["ffmpeg", "ffprobe"] {
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::process::Command::new(program)
+                .arg("-version")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        {
+            Ok(Ok(output)) if output.status.success() => {
+                doctor_ok(&format!("{program}: available"))
+            }
+            _ => doctor_warning(&format!(
+                "{program}: missing (downloads require the ffmpeg package)"
+            )),
+        }
+    }
     let mut pipewire_tools = true;
     for program in ["pw-dump", "pw-record"] {
         match tokio::process::Command::new(program)
@@ -449,6 +572,67 @@ fn dependency_help(program: &str) -> String {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    #[test]
+    fn local_play_and_listing_accept_script_and_file_options() {
+        assert!(matches!(
+            Cli::try_parse_from(["dymus", "local", "Artist", "--json"])
+                .unwrap()
+                .command,
+            Some(Command::Local { json: true, .. })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "dymus",
+                "play",
+                "local",
+                "--all",
+                "--detach",
+                "--path",
+                "/tmp/music"
+            ])
+            .unwrap()
+            .command,
+            Some(Command::Play {
+                target: PlayTarget::Local {
+                    all: true,
+                    path: Some(_),
+                    ..
+                },
+                detach: true,
+                ..
+            })
+        ));
+        assert!(
+            Cli::try_parse_from(["dymus", "play", "local", "/tmp/video.mp4", "--video"]).is_ok()
+        );
+    }
+
+    #[test]
+    fn download_targets_accept_global_video_and_path_overrides() {
+        for target in ["song", "video", "album", "playlist"] {
+            let cli = Cli::try_parse_from([
+                "dymus",
+                "download",
+                target,
+                "query",
+                "--video",
+                "--path",
+                "/tmp/music space",
+            ])
+            .unwrap();
+            assert!(matches!(
+                cli.command,
+                Some(Command::Download {
+                    video: true,
+                    path: Some(_),
+                    ..
+                })
+            ));
+        }
+        assert!(Cli::try_parse_from(["dymus", "download", "--video", "playlist", "query"]).is_ok());
+        assert!(Cli::try_parse_from(["dymus", "download", "song"]).is_err());
+    }
 
     #[test]
     fn video_flag_applies_to_every_headless_play_target() {

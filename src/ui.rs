@@ -289,11 +289,13 @@ fn settings(frame: &mut Frame, app: &App, area: Rect) {
         ("artists", "artists"),
         ("podcasts", "podcasts"),
         ("radio", "world radio"),
+        ("local", "local library"),
         ("queue", "queue / switch view"),
         ("now_playing", "now playing"),
         ("pause", "pause"),
         ("next_track", "next track"),
         ("retry_track", "retry track"),
+        ("video", "video window"),
         ("volume_up", "volume up"),
         ("volume_down", "volume down"),
         ("help", "help"),
@@ -334,7 +336,7 @@ fn navigation(frame: &mut Frame, app: &App, area: Rect) {
         && !app.library_focused
         && !app.radio_focused
         && !app.queue_focused;
-    let labels: [&str; 9] = if area.width >= 90 {
+    let labels: [&str; 10] = if area.width >= 110 {
         [
             "home",
             "explore",
@@ -342,20 +344,22 @@ fn navigation(frame: &mut Frame, app: &App, area: Rect) {
             "albums",
             "artists",
             "podcasts",
+            "local",
             "radio",
             "search",
             "queue",
         ]
-    } else if area.width >= 84 {
+    } else if area.width >= 95 {
         [
-            "home", "explore", "lists", "albums", "artists", "pods", "radio", "search", "queue",
+            "home", "exp", "lists", "albums", "artists", "pods", "local", "radio", "search",
+            "queue",
         ]
-    } else if area.width >= 70 {
+    } else if area.width >= 82 {
         [
-            "home", "exp", "lists", "alb", "art", "pod", "radio", "search", "queue",
+            "home", "exp", "lists", "alb", "art", "pod", "local", "radio", "find", "queue",
         ]
     } else {
-        ["H", "E", "P", "A", "R", "D", "O", "S", "Q"]
+        ["H", "E", "P", "A", "R", "D", "L", "O", "S", "Q"]
     };
     let keys = [
         app.config.keybindings.home.as_str(),
@@ -364,6 +368,7 @@ fn navigation(frame: &mut Frame, app: &App, area: Rect) {
         app.config.keybindings.albums.as_str(),
         app.config.keybindings.artists.as_str(),
         app.config.keybindings.podcasts.as_str(),
+        app.config.keybindings.local.as_str(),
         app.config.keybindings.radio.as_str(),
         app.config.keybindings.search.as_str(),
         app.config.keybindings.queue.as_str(),
@@ -371,10 +376,19 @@ fn navigation(frame: &mut Frame, app: &App, area: Rect) {
     let selected = [
         app.home_focused,
         app.explore_focused,
-        app.library_focused && app.library_kind == crate::innertube::LibraryKind::Playlists,
-        app.library_focused && app.library_kind == crate::innertube::LibraryKind::Albums,
-        app.library_focused && app.library_kind == crate::innertube::LibraryKind::Artists,
-        app.library_focused && app.library_kind == crate::innertube::LibraryKind::Podcasts,
+        app.library_focused
+            && !app.local_focused
+            && app.library_kind == crate::innertube::LibraryKind::Playlists,
+        app.library_focused
+            && !app.local_focused
+            && app.library_kind == crate::innertube::LibraryKind::Albums,
+        app.library_focused
+            && !app.local_focused
+            && app.library_kind == crate::innertube::LibraryKind::Artists,
+        app.library_focused
+            && !app.local_focused
+            && app.library_kind == crate::innertube::LibraryKind::Podcasts,
+        app.local_focused,
         app.radio_focused,
         search_active,
         app.queue_focused,
@@ -399,10 +413,12 @@ fn navigation(frame: &mut Frame, app: &App, area: Rect) {
         if area.width >= 38 {
             spans.push(Span::raw(" "));
         }
-        spans.push(Span::styled(
-            *label,
-            if is_selected { active } else { inactive },
-        ));
+        if area.width >= 48 {
+            spans.push(Span::styled(
+                *label,
+                if is_selected { active } else { inactive },
+            ));
+        }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -452,6 +468,7 @@ fn footer(frame: &mut Frame, app: &App, area: Rect) {
         };
         hints.extend([
             (keys.pause.as_str(), "pause"),
+            (keys.video.as_str(), "video/audio"),
             (keys.next_track.as_str(), "next"),
             ("←/→", "seek"),
             ("−/+", "volume"),
@@ -495,10 +512,20 @@ fn footer(frame: &mut Frame, app: &App, area: Rect) {
                 (".", "actions"),
             ]
         } else {
-            vec![("j/k", "move"), ("Enter", "open"), ("1–4", "collections")]
+            vec![("j/k", "move"), ("Enter", "open"), ("1–5", "collections")]
         };
+        if app.local_focused {
+            hints.push(("L", "refresh"));
+        }
         hints.extend([
-            (keys.search.as_str(), "search"),
+            (
+                keys.search.as_str(),
+                if app.local_focused {
+                    "filter"
+                } else {
+                    "search"
+                },
+            ),
             (keys.queue.as_str(), "queue"),
         ]);
         if !app.library_detail && app.library_continuation.is_some() {
@@ -1291,11 +1318,15 @@ fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn library(frame: &mut Frame, app: &mut App, area: Rect) {
-    let label = match app.library_kind {
-        crate::innertube::LibraryKind::Playlists => "playlists",
-        crate::innertube::LibraryKind::Albums => "albums",
-        crate::innertube::LibraryKind::Artists => "artists",
-        crate::innertube::LibraryKind::Podcasts => "podcasts",
+    let label = if app.local_focused {
+        "local collections (5 · L refresh · / filter)"
+    } else {
+        match app.library_kind {
+            crate::innertube::LibraryKind::Playlists => "playlists",
+            crate::innertube::LibraryKind::Albums => "albums",
+            crate::innertube::LibraryKind::Artists => "artists",
+            crate::innertube::LibraryKind::Podcasts => "podcasts",
+        }
     };
     if app.library_loading {
         frame.render_widget(
@@ -1324,7 +1355,11 @@ fn library(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     if app.library_items.is_empty() {
         let message = if app.toast.is_none() {
-            format!("No {label}")
+            if app.local_focused {
+                "No local content · download music or configure [local].roots · L refresh".into()
+            } else {
+                format!("No {label}")
+            }
         } else {
             "".into()
         };
@@ -1473,7 +1508,11 @@ fn search(frame: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled(
                 if placeholder {
-                    "Search songs, artists, albums, or playlists"
+                    if app.local_focused {
+                        "Filter local collections, titles, artists, or albums"
+                    } else {
+                        "Search songs, artists, albums, or playlists"
+                    }
                 } else {
                     visible
                 },
@@ -1486,7 +1525,11 @@ fn search(frame: &mut Frame, app: &App, area: Rect) {
         ])),
         area,
     );
-    let filter = format!(" [{}]", app.search_filter.label());
+    let filter = if app.local_focused {
+        " [local]".into()
+    } else {
+        format!(" [{}]", app.search_filter.label())
+    };
     let filter_width = Line::from(filter.as_str()).width() as u16;
     if area.width > filter_width {
         frame.render_widget(
@@ -1657,11 +1700,13 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("d · J/K", "Remove / move selection"),
     ("C", "Clear upcoming queue"),
     ("Space · n/r", "Pause · next / retry"),
+    ("V", "Toggle compact video window / audio"),
     (
         "h/e · 1–4",
         "Home / Explore / Playlists / Albums / Artists / Podcasts",
     ),
     ("o", "World radio"),
+    ("5 · L · /", "Local library / refresh / filter"),
     ("Enter · Esc", "Open an item / return from its detail"),
     ("t · q/v/y · Tab", "Now-playing view · switch right pane"),
     ("Shift+Tab", "Previous Now-playing panel"),

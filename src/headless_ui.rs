@@ -10,7 +10,7 @@ use std::{
     future::Future,
     io::{self, IsTerminal, Write},
 };
-use tokio::time::{Duration, Instant};
+use tokio::time::Duration;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Debug)]
@@ -22,21 +22,140 @@ impl fmt::Display for Cancelled {
 }
 impl std::error::Error for Cancelled {}
 
+/// A small inline region: no alternate screen, no accumulated progress log.
+#[derive(Default)]
+pub struct Block {
+    rows: usize,
+}
+
+impl Block {
+    pub fn clear(&mut self) -> Result<()> {
+        if self.rows == 0 {
+            return Ok(());
+        }
+        let mut output = format!("\x1b[{}A", self.rows);
+        for _ in 0..self.rows {
+            output.push_str("\r\x1b[2K\n");
+        }
+        output.push_str(&format!("\x1b[{}A\r", self.rows));
+        io::stdout().write_all(output.as_bytes())?;
+        self.rows = 0;
+        Ok(())
+    }
+
+    pub fn draw(&mut self, lines: &[Row]) -> Result<()> {
+        let interactive = io::stdout().is_terminal();
+        let height = terminal::size().map(|(_, h)| usize::from(h)).unwrap_or(24);
+        let count = lines.len().min(height.saturating_sub(4).max(1));
+        let mut output = if interactive && self.rows > 0 {
+            format!("\x1b[{}A", self.rows)
+        } else {
+            String::new()
+        };
+        let extent = if interactive {
+            count.max(self.rows)
+        } else {
+            count
+        };
+        for index in 0..extent {
+            if interactive {
+                output.push_str("\r\x1b[2K");
+            }
+            if let Some(row) = lines.get(index).filter(|_| index < count) {
+                let text = fit(&format!("  {}", row.text), width().saturating_sub(1));
+                if interactive && std::env::var_os("NO_COLOR").is_none() {
+                    let styled = text.with(row.color);
+                    output.push_str(&if row.bold {
+                        styled.bold().to_string()
+                    } else {
+                        styled.to_string()
+                    });
+                } else {
+                    output.push_str(&text);
+                }
+            }
+            output.push('\n');
+        }
+        if interactive && extent > count {
+            output.push_str(&format!("\x1b[{}A\r", extent - count));
+        }
+        io::stdout().write_all(output.as_bytes())?;
+        io::stdout().flush()?;
+        self.rows = if interactive { count } else { 0 };
+        Ok(())
+    }
+}
+
+pub struct Row {
+    pub text: String,
+    color: Color,
+    bold: bool,
+}
+impl Row {
+    pub(crate) fn title(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            color: Color::Rgb {
+                r: 226,
+                g: 232,
+                b: 240,
+            },
+            bold: true,
+        }
+    }
+    pub(crate) fn muted(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            color: Color::Rgb {
+                r: 139,
+                g: 149,
+                b: 167,
+            },
+            bold: false,
+        }
+    }
+    pub(crate) fn accent(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            color: Color::Rgb {
+                r: 125,
+                g: 211,
+                b: 218,
+            },
+            bold: false,
+        }
+    }
+    pub(crate) fn blank() -> Self {
+        Self::muted("")
+    }
+}
+
 pub struct Flow {
-    step: usize,
+    block: Block,
 }
 impl Flow {
     pub fn new(title: &str, detail: &str) -> Self {
         println!();
-        line(&format!("Dymus · {title}"), Color::Cyan);
-        line(detail, Color::DarkGrey);
-        Self { step: 0 }
-    }
-
-    fn stage(&mut self, title: &str) {
-        self.step += 1;
+        line(
+            &format!(
+                "  dymus  /  {}",
+                title
+                    .strip_prefix("Headless ")
+                    .unwrap_or(title)
+                    .to_lowercase()
+            ),
+            Color::Rgb {
+                r: 125,
+                g: 211,
+                b: 218,
+            },
+        );
         println!();
-        line(&format!("{} · {title}", self.step), Color::Cyan);
+        let mut flow = Self {
+            block: Block::default(),
+        };
+        let _ = flow.block.draw(&[Row::muted(detail)]);
+        flow
     }
 
     pub async fn load<T>(
@@ -45,12 +164,14 @@ impl Flow {
         detail: &str,
         future: impl Future<Output = Result<T>>,
     ) -> Result<T> {
-        self.stage(title);
-        line(detail, Color::DarkGrey);
-        let started = Instant::now();
-        let mut spinner = Loading::new();
+        let mut frame = 0;
+        let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
         let mut tick = tokio::time::interval(Duration::from_millis(120));
         tokio::pin!(future);
+        let interactive = io::stdout().is_terminal();
+        if !interactive {
+            self.block.draw(&[Row::muted(title)])?;
+        }
         let result = loop {
             tokio::select! {
                 result = &mut future => break result,
@@ -58,17 +179,29 @@ impl Flow {
                     signal.context("Cannot listen for cancellation")?;
                     break Err(Cancelled.into());
                 }
-                _ = tick.tick() => spinner.draw(started.elapsed().as_secs())?,
+                _ = tick.tick(), if interactive => {
+                    self.block.draw(&[
+                        Row::accent(format!("{}  {title}", frames[frame % frames.len()])),
+                        Row::muted(detail),
+                    ])?;
+                    frame += 1;
+                }
             }
         };
-        drop(spinner);
-        match &result {
-            Ok(_) => line(
-                &format!("✓ Ready · {:.1}s", started.elapsed().as_secs_f32()),
-                Color::Green,
-            ),
-            Err(error) if error.is::<Cancelled>() => {}
-            Err(_) => line("× This step failed", Color::Red),
+        if interactive {
+            self.block.clear()?;
+        }
+        if result.is_err()
+            && !result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.is::<Cancelled>())
+        {
+            self.block.draw(&[Row {
+                text: title.into(),
+                color: Color::Red,
+                bold: false,
+            }])?;
         }
         result
     }
@@ -84,7 +217,6 @@ impl Flow {
             "{title} requires an interactive terminal"
         );
         ensure!(!choices.is_empty(), "No choices available");
-        self.stage(title);
         let digits = choices.len().to_string().len();
         let descriptions: Vec<_> = choices.iter().map(&describe).collect();
         let rows = descriptions
@@ -92,20 +224,23 @@ impl Flow {
             .map(|text| text.lines().count())
             .max()
             .unwrap_or(1)
-            .max(1);
-        let height = terminal::size()
-            .map(|(_, height)| usize::from(height))
-            .unwrap_or(24);
-        let page_size = (height.saturating_sub(8) / rows).max(1);
+            .max(1)
+            + 1;
+        let height = terminal::size().map(|(_, h)| usize::from(h)).unwrap_or(24);
+        let page_size = (height.saturating_sub(10) / rows).max(1);
         let pages = choices.len().div_ceil(page_size);
         let mut page = 0;
+        let mut invalid = false;
         loop {
-            if pages > 1 {
-                line(
-                    &format!("Page {} of {pages} · {} matches", page + 1, choices.len()),
-                    Color::DarkGrey,
-                );
-            }
+            let mut view = vec![
+                Row::title(title),
+                Row::muted(if pages > 1 {
+                    format!("{} results  ·  page {} / {pages}", choices.len(), page + 1)
+                } else {
+                    format!("{} results", choices.len())
+                }),
+                Row::blank(),
+            ];
             for (index, description) in descriptions
                 .iter()
                 .enumerate()
@@ -113,78 +248,154 @@ impl Flow {
                 .take(page_size)
             {
                 let mut rows = description.lines();
-                let prefix = format!("{:>digits$}. ", index + 1);
-                line(
-                    &format!("{prefix}{}", rows.next().unwrap_or_default()),
-                    Color::White,
-                );
+                view.push(Row::title(format!(
+                    "{:>digits$}  {}",
+                    index + 1,
+                    rows.next().unwrap_or_default()
+                )));
                 for detail in rows {
-                    line(
-                        &format!("{}{}", " ".repeat(digits + 2), detail),
-                        Color::DarkGrey,
-                    );
+                    view.push(Row::muted(format!("{}{}", " ".repeat(digits + 2), detail)));
                 }
+                view.push(Row::blank());
             }
-            line("Enter number · q/Esc to cancel", Color::DarkGrey);
-            if pages > 1 {
-                line("n/p + Enter: next/previous page", Color::DarkGrey);
-            }
-            loop {
-                let prompt = fit(
-                    &format!("Choose [1–{}]: ", choices.len()),
-                    width().saturating_sub(8),
-                );
-                let input = read_input(&prompt, digits)?;
-                match input.trim().to_ascii_lowercase().as_str() {
-                    "n" if pages > 1 => {
-                        page = (page + 1).min(pages - 1);
-                        break;
-                    }
-                    "p" if pages > 1 => {
-                        page = page.saturating_sub(1);
-                        break;
-                    }
-                    _ => {}
+            view.push(Row::muted(if invalid {
+                format!("Choose 1–{}  ·  q cancel", choices.len())
+            } else if pages > 1 {
+                "number select  ·  n/p page  ·  q cancel".into()
+            } else {
+                "number select  ·  q cancel".into()
+            }));
+            self.block.draw(&view)?;
+            let input = read_input("  › ", digits)?;
+            self.block.rows += 1;
+            match input.trim().to_ascii_lowercase().as_str() {
+                "n" if pages > 1 => {
+                    page = (page + 1).min(pages - 1);
+                    invalid = false;
+                    continue;
                 }
-                if let Ok(index) = input.trim().parse::<usize>()
-                    && let Some(choice) = index.checked_sub(1).and_then(|index| choices.get(index))
-                {
-                    line(
-                        &format!(
-                            "✓ {}",
-                            descriptions[index - 1].lines().next().unwrap_or_default()
-                        ),
-                        Color::Green,
-                    );
-                    return Ok(choice.clone());
+                "p" if pages > 1 => {
+                    page = page.saturating_sub(1);
+                    invalid = false;
+                    continue;
                 }
-                line(
-                    &format!("Use a number from 1 to {}, or q to cancel.", choices.len()),
-                    Color::Yellow,
-                );
+                _ => {}
             }
+            if let Ok(index) = input.trim().parse::<usize>()
+                && let Some(choice) = index.checked_sub(1).and_then(|index| choices.get(index))
+            {
+                self.block.clear()?;
+                return Ok(choice.clone());
+            }
+            invalid = true;
         }
     }
 
-    pub fn playing(&mut self, title: &str, artist: &str, detail: &str, detached: bool) {
-        self.stage(if detached {
-            "Playback detached"
-        } else {
-            "Now playing"
-        });
-        line(title, Color::White);
-        line(artist, Color::DarkGrey);
-        line(detail, Color::DarkGrey);
-        if detached {
-            line("Playback continues after this command exits.", Color::Green);
-        } else {
-            line("Ctrl+C to stop", Color::DarkGrey);
-            line("Control from another terminal.", Color::DarkGrey);
-        }
-        line("Controls: dymus control <action>", Color::DarkGrey);
-        line("status · toggle · next · previous", Color::DarkGrey);
-        line("volume <0–100> · stop", Color::DarkGrey);
+    pub fn snapshot(&mut self, view: &PlaybackView<'_>) -> Result<()> {
+        self.block.draw(&playback_rows(view, width()))
     }
+
+    pub fn playing(&mut self, title: &str, artist: &str, detail: &str, detached: bool) {
+        let _ = self.block.clear();
+        if detached || !io::stdout().is_terminal() {
+            let _ = self.block.draw(&[
+                Row::title(title),
+                Row::muted(artist),
+                Row::blank(),
+                Row::accent(if detached {
+                    "playing in background"
+                } else {
+                    "playing"
+                }),
+                Row::muted(detail),
+                Row::blank(),
+                Row::muted("dymus control status / toggle / next / stop"),
+            ]);
+        }
+    }
+}
+
+pub struct PlaybackView<'a> {
+    pub title: &'a str,
+    pub artist: &'a str,
+    pub position: Option<f64>,
+    pub duration: Option<f64>,
+    pub paused: bool,
+    pub video: bool,
+    pub index: usize,
+    pub total: usize,
+    pub volume: u8,
+}
+
+pub fn playback_rows(view: &PlaybackView<'_>, available: usize) -> Vec<Row> {
+    let available = available.saturating_sub(3);
+    let duration = view
+        .duration
+        .filter(|value| value.is_finite() && *value > 0.0);
+    let position = view
+        .position
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0)
+        .max(0.0);
+    let clock = |seconds: f64| {
+        let s = seconds.max(0.0) as u64;
+        format!("{}:{:02}", s / 60, s % 60)
+    };
+    let time = format!(
+        "{} / {}",
+        clock(position),
+        duration.map(clock).unwrap_or_else(|| "--:--".into())
+    );
+    let meter_width = available
+        .saturating_sub(UnicodeWidthStr::width(time.as_str()) + 3)
+        .min(36);
+    let progress = if meter_width >= 4 {
+        let fraction = duration
+            .map(|seconds| (position / seconds).clamp(0.0, 1.0))
+            .unwrap_or(0.0);
+        let filled = (fraction * meter_width as f64).floor() as usize;
+        format!(
+            "{}{}  {time}",
+            "━".repeat(filled),
+            "─".repeat(meter_width - filled)
+        )
+    } else {
+        time
+    };
+    let status = if view.paused {
+        "paused"
+    } else if view.position.is_none() {
+        "buffering"
+    } else {
+        "playing"
+    };
+    let mut metadata = vec![
+        status.to_owned(),
+        if view.video {
+            "video".into()
+        } else {
+            "audio".into()
+        },
+    ];
+    if view.total > 1 {
+        metadata.push(format!("{} / {}", view.index + 1, view.total));
+    }
+    metadata.push(format!("vol {}%", view.volume));
+    vec![
+        Row::title(view.title),
+        Row::muted(view.artist),
+        Row::blank(),
+        Row::accent(progress),
+        Row::muted(metadata.join("  ·  ")),
+        Row::blank(),
+        Row::muted("ctrl+c stop  ·  dymus control toggle / next"),
+    ]
+    .into_iter()
+    .map(|mut row| {
+        row.text = fit(&row.text, available);
+        row
+    })
+    .collect()
 }
 
 struct RawInput;
@@ -244,7 +455,7 @@ pub fn width() -> usize {
     terminal::size()
         .map(|(width, _)| usize::from(width))
         .unwrap_or(80)
-        .min(120)
+        .min(88)
 }
 pub fn clean(text: &str) -> String {
     text.chars()
@@ -281,50 +492,44 @@ fn line(text: &str, color: Color) {
     }
 }
 
-struct Loading {
-    active: bool,
-    frame: usize,
-}
-impl Loading {
-    fn new() -> Self {
-        let active = io::stdout().is_terminal();
-        if !active {
-            println!("Loading…");
-        }
-        Self { active, frame: 0 }
-    }
-    fn draw(&mut self, seconds: u64) -> Result<()> {
-        if !self.active {
-            return Ok(());
-        }
-        let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-        let text = fit(
-            &format!(
-                "{} Loading · {seconds}s · Ctrl+C to cancel",
-                frames[self.frame % frames.len()]
-            ),
-            width().saturating_sub(1),
-        );
-        print!("\r\x1b[2K{text}");
-        io::stdout()
-            .flush()
-            .context("Cannot update loading indicator")?;
-        self.frame += 1;
-        Ok(())
-    }
-}
-impl Drop for Loading {
-    fn drop(&mut self) {
-        if self.active {
-            print!("\r\x1b[2K");
-            let _ = io::stdout().flush();
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn playback_card_is_compact_safe_and_adapts_to_terminal_width() {
+        let view = PlaybackView {
+            title: "Feather\n日本語\x1b[2J",
+            artist: "Nujabes",
+            position: Some(52.0),
+            duration: Some(204.0),
+            paused: false,
+            video: false,
+            index: 1,
+            total: 12,
+            volume: 65,
+        };
+        for width in [0, 1, 12, 30, 60, 88] {
+            let rows = playback_rows(&view, width);
+            assert_eq!(rows.len(), 7);
+            for row in &rows {
+                assert!(UnicodeWidthStr::width(row.text.as_str()) <= width.saturating_sub(3));
+                assert!(!row.text.chars().any(char::is_control));
+            }
+            if width >= 60 {
+                assert!(rows[3].text.ends_with("0:52 / 3:24"));
+                assert_eq!(rows[4].text, "playing  ·  audio  ·  2 / 12  ·  vol 65%");
+            }
+        }
+        let paused = PlaybackView {
+            paused: true,
+            duration: None,
+            ..view
+        };
+        let rows = playback_rows(&paused, 88);
+        assert!(rows[3].text.ends_with("0:52 / --:--"));
+        assert!(rows[4].text.starts_with("paused"));
+    }
+
     #[test]
     fn feedback_fits_narrow_terminals_without_control_characters() {
         let text = "Long title 🎵 日本語\nwith\rterminal\x1bcontrols".repeat(4);

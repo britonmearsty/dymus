@@ -340,6 +340,22 @@ fn metadata_for(state: &TrackState) -> Metadata {
         builder = builder.length(Time::from_micros(state.duration_micros));
     }
     if let Some(video_id) = &state.video_id {
+        if let Some(path) = crate::local::path(video_id) {
+            if let Ok(id) = TrackId::try_from(format!("/dymus/local/{:x}", md5::compute(video_id)))
+            {
+                builder = builder.trackid(id);
+            }
+            if let Some(uri) = crate::local::file_uri(path) {
+                builder = builder.url(uri);
+            }
+            if let Some(uri) = crate::local::artwork(path)
+                .as_deref()
+                .and_then(crate::local::file_uri)
+            {
+                builder = builder.art_url(uri);
+            }
+            return builder.build();
+        }
         let element: String = video_id
             .chars()
             .map(|character| {
@@ -396,6 +412,30 @@ mod tests {
             duration_micros: (duration_secs * 1_000_000.0) as i64,
             position_micros: 0,
         }
+    }
+
+    #[test]
+    fn local_metadata_uses_encoded_file_urls_and_offline_art() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("音楽 space.mp3");
+        std::fs::write(&path, b"audio").unwrap();
+        std::fs::write(path.with_extension("jpg"), b"image").unwrap();
+        let state = TrackState {
+            title: Some("Song".into()),
+            video_id: Some(format!("local:{}", path.display())),
+            ..Default::default()
+        };
+        let metadata = metadata_for(&state);
+        assert!(metadata.url().unwrap().starts_with("file://"));
+        assert!(metadata.url().unwrap().contains("%20"));
+        assert!(metadata.art_url().unwrap().starts_with("file://"));
+        assert!(
+            metadata
+                .trackid()
+                .unwrap()
+                .to_string()
+                .starts_with("/dymus/local/")
+        );
     }
 
     #[test]
