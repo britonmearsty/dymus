@@ -146,6 +146,10 @@ pub(crate) fn loadfile_has_index(commands: &Value) -> bool {
 
 async fn choose_youtube(query: &str, limit: Option<usize>, flow: &mut Flow) -> Result<Track> {
     ensure!(
+        !query.trim().is_empty(),
+        "Enter a song title, artist, or YouTube URL to search for"
+    );
+    ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
         "Choosing a YouTube result requires an interactive terminal; use `dymus search --json` for JSON results"
     );
@@ -157,7 +161,13 @@ async fn choose_youtube(query: &str, limit: Option<usize>, flow: &mut Flow) -> R
             crate::youtube::search(query, limit),
         )
         .await?;
-    ensure!(!tracks.is_empty(), "No YouTube results found");
+    if tracks.is_empty() {
+        return flow.empty(
+            "No YouTube results found",
+            &format!("Nothing matched “{}”.", headless_ui::clean(query)),
+            "Try a shorter query, a different title or artist, or a YouTube URL.",
+        );
+    }
     flow.choose("Choose a YouTube result", &tracks, |track| {
         let duration = if track.duration.is_empty() {
             String::new()
@@ -205,10 +215,13 @@ pub async fn play_local(
         .into_iter()
         .filter(|c| !c.tracks.is_empty() && id.is_none_or(|id| c.id == id))
         .collect::<Vec<_>>();
-    ensure!(
-        !collections.is_empty(),
-        "No playable local content found; download media or configure [local].roots (use `dymus local --json` to list collection IDs)"
-    );
+    if collections.is_empty() {
+        return flow.empty(
+            "No playable local media found",
+            if id.is_some() { "No playable collection matches that ID." } else if !filter.trim().is_empty() { "No playable tracks or collections match your search." } else { "The local library has no available media files." },
+            "Use `dymus local --json` to find collection IDs, choose a music directory with `--path`, or download a track with `dymus download song`.",
+        );
+    }
     let tracks = if all {
         collections.into_iter().flat_map(|c| c.tracks).collect()
     } else {
@@ -311,7 +324,13 @@ async fn play_tracks(
     volume: u8,
     flow: &mut Flow,
 ) -> Result<()> {
-    ensure!(!tracks.is_empty(), "No playable tracks found");
+    if tracks.is_empty() {
+        return flow.empty(
+            "No playable tracks found",
+            "This collection has no available tracks.",
+            "Choose another collection or add tracks to it, then retry.",
+        );
+    }
     let config = Config::load()?;
     let (socket, state) = paths()?;
     ensure_socket_is_available(&socket).await?;
@@ -346,6 +365,9 @@ async fn play_tracks(
         )
         .await?;
     let mut command = Command::new("mpv");
+    // Keep warnings from both output streams: otherwise startup failures only
+    // report an exit code. The private temporary file also works when detached.
+    let diagnostics = tempfile::NamedTempFile::new()?;
     command.as_std_mut().process_group(0);
     if let Some(audio) = source.audio {
         command.arg(format!("--audio-file={audio}"));
@@ -353,7 +375,10 @@ async fn play_tracks(
     command
         .args([
             "--no-config",
-            "--no-terminal",
+            "--terminal=yes",
+            "--input-terminal=no",
+            "--term-status-msg=",
+            "--msg-level=all=warn",
             if video {
                 "--force-window=yes"
             } else {
@@ -372,8 +397,8 @@ async fn play_tracks(
         .arg("--")
         .arg(source.video)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(diagnostics.as_file().try_clone()?))
+        .stderr(Stdio::from(diagnostics.as_file().try_clone()?))
         .kill_on_drop(false);
     let mut child = HeadlessChild {
         child: command
@@ -389,7 +414,8 @@ async fn play_tracks(
             wait_for_playback(&socket, &mut child).await
         },
     )
-    .await?;
+    .await
+    .map_err(|error| playback_diagnostic(error, diagnostics.path()))?;
     spawn_resolver(&session)?;
     flow.playing(
         &tracks[0].title,
@@ -410,10 +436,47 @@ async fn play_tracks(
     }
     let status = child.wait().await.context("Cannot wait for mpv")?;
     if !status.success() {
-        bail!("mpv exited with {status}");
+        return Err(playback_diagnostic(
+            anyhow::anyhow!("mpv exited with {status}"),
+            diagnostics.path(),
+        ));
     }
     println!("  playback ended\n");
     Ok(())
+}
+
+fn playback_diagnostic(error: anyhow::Error, path: &Path) -> anyhow::Error {
+    use std::io::Read;
+    let details = (|| -> io::Result<String> {
+        let file = fs::File::open(path)?;
+        let mut bytes = Vec::new();
+        file.take(8192).read_to_end(&mut bytes)?;
+        Ok(sanitize_playback_diagnostic(&String::from_utf8_lossy(
+            &bytes,
+        )))
+    })()
+    .unwrap_or_default();
+    if details.is_empty() {
+        error
+    } else {
+        anyhow::anyhow!("{error:#}\nmpv: {details}")
+    }
+}
+
+fn sanitize_playback_diagnostic(output: &str) -> String {
+    // Signed stream URLs can contain session information. Show the player
+    // failure without copying those URLs into the user's terminal or reports.
+    output
+        .split_whitespace()
+        .map(|word| {
+            if word.contains("https://") || word.contains("http://") {
+                "[stream URL]"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[derive(Default)]
@@ -631,10 +694,34 @@ pub async fn resolve_remaining(start: usize, session: Option<&str>) -> Result<()
 }
 
 pub async fn control(action: Control) -> Result<()> {
+    if let Control::Volume(level) = action {
+        ensure!(level <= 100, "Volume must be between 0 and 100");
+    }
     let (socket, state_path) = paths()?;
-    let mut socket = UnixStream::connect(&socket)
-        .await
-        .context("No headless Dymus player is running")?;
+    let mut socket = match UnixStream::connect(&socket).await {
+        Ok(socket) => socket,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            let feedback = headless_ui::Feedback::empty(
+                "No headless player is running",
+                "There is no active playback session to control.",
+                "Start playback with `dymus play song \"song or artist\" --detach`.",
+            );
+            if matches!(action, Control::Status) {
+                return headless_ui::print_empty(
+                    "No headless player is running",
+                    "Nothing is playing in headless mode.",
+                    "Start playback with `dymus play song \"song or artist\" --detach`.",
+                );
+            }
+            return Err(feedback.into());
+        }
+        Err(error) => return Err(error).context("Cannot connect to the headless player"),
+    };
     match action {
         Control::Pause => {
             command(&mut socket, json!(["set_property", "pause", true])).await?;
@@ -646,9 +733,11 @@ pub async fn control(action: Control) -> Result<()> {
             command(&mut socket, json!(["cycle", "pause"])).await?;
         }
         Control::Next => {
+            check_queue_step(&mut socket, true).await?;
             command(&mut socket, json!(["playlist-next", "force"])).await?;
         }
         Control::Previous => {
+            check_queue_step(&mut socket, false).await?;
             command(&mut socket, json!(["playlist-prev", "force"])).await?;
         }
         Control::Stop => {
@@ -659,6 +748,46 @@ pub async fn control(action: Control) -> Result<()> {
             command(&mut socket, json!(["set_property", "volume", level])).await?;
         }
         Control::Status => print_status(&mut socket, &state_path).await?,
+    }
+    Ok(())
+}
+
+async fn check_queue_step(socket: &mut UnixStream, next: bool) -> Result<()> {
+    let count = command(socket, json!(["get_property", "playlist-count"])).await?;
+    let count = count
+        .as_u64()
+        .context("The player returned an invalid queue length")?;
+    let index = if count == 0 {
+        None
+    } else {
+        command(socket, json!(["get_property", "playlist-pos"]))
+            .await?
+            .as_u64()
+    };
+    validate_queue_step(count, index, next)
+}
+
+fn validate_queue_step(count: u64, index: Option<u64>, next: bool) -> Result<()> {
+    let feedback = match index.filter(|index| *index < count) {
+        None => Some(headless_ui::Feedback::empty(
+            "Playback queue is empty",
+            "There is no current track to move from.",
+            "Choose a song or collection to start playback.",
+        )),
+        Some(index) if next && index == count - 1 => Some(headless_ui::Feedback::empty(
+            "No next track",
+            "You are already on the last track in the current queue.",
+            "Let this track finish, choose another collection, or use `dymus control previous`.",
+        )),
+        Some(0) if !next => Some(headless_ui::Feedback::empty(
+            "No previous track",
+            "You are already on the first track in the current queue.",
+            "Keep listening or use `dymus control next` when more tracks are available.",
+        )),
+        _ => None,
+    };
+    if let Some(feedback) = feedback {
+        return Err(feedback.into());
     }
     Ok(())
 }
@@ -720,7 +849,9 @@ async fn library_item_tracks(
         })
         .take(result_limit)
         .collect::<Vec<_>>();
-    ensure!(!items.is_empty(), "No playable library {label} found");
+    if items.is_empty() {
+        return flow.empty(&format!("Your library has no playable {label}"), "YouTube Music returned no available items in this section.", "Add items to this section in YouTube Music, or try `dymus search` with a song or artist.");
+    }
     let item = flow.choose(&format!("Choose from library {label}"), &items, |item| {
         if item.detail.is_empty() {
             headless_ui::clean(&item.title)
@@ -787,6 +918,10 @@ async fn collection_tracks(
     result_limit: usize,
     flow: &mut Flow,
 ) -> Result<DownloadSelection> {
+    ensure!(
+        !query.trim().is_empty(),
+        "Enter a {label} title or artist to search for"
+    );
     let items = flow
         .load(
             &format!("Search {label}s"),
@@ -799,7 +934,16 @@ async fn collection_tracks(
         .filter(|item| !item.browse_id.is_empty() || !item.playlist_id.is_empty())
         .take(result_limit)
         .collect::<Vec<_>>();
-    ensure!(!items.is_empty(), "No playable {label} found");
+    if items.is_empty() {
+        return flow.empty(
+            &format!("No {label}s found"),
+            &format!(
+                "No playable {label} matched “{}”.",
+                headless_ui::clean(query)
+            ),
+            "Try a shorter query or a different title or artist.",
+        );
+    }
     let item = flow.choose(&format!("Choose a {label}"), &items, |item| {
         if item.detail.is_empty() {
             headless_ui::clean(&item.title)
@@ -839,6 +983,17 @@ async fn load_collection_tracks(
             );
             page = api.library_tracks_more(&token).await?;
             tracks.extend(page.tracks);
+        }
+        if tracks.is_empty() {
+            return Err(headless_ui::Feedback::empty(
+                "This collection has no playable tracks",
+                format!(
+                    "“{}” returned no available tracks.",
+                    headless_ui::clean(&item.title)
+                ),
+                "Choose another collection or add tracks to it in YouTube Music, then retry.",
+            )
+            .into());
         }
         Ok(tracks)
     })
@@ -993,6 +1148,14 @@ async fn command(socket: &mut UnixStream, value: Value) -> Result<Value> {
 }
 
 async fn print_status(socket: &mut UnixStream, state_path: &Path) -> Result<()> {
+    let count = command(socket, json!(["get_property", "playlist-count"])).await?;
+    if count.as_u64() == Some(0) {
+        return headless_ui::print_empty(
+            "Playback queue is empty",
+            "The headless player has no tracks loaded.",
+            "Use `dymus control stop`, then choose a song or collection to start playback.",
+        );
+    }
     let title = command(socket, json!(["get_property", "media-title"])).await?;
     let paused = command(socket, json!(["get_property", "pause"])).await?;
     let position = command(socket, json!(["get_property", "time-pos"])).await?;
@@ -1092,6 +1255,43 @@ fn progress_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_controls_preserve_playback_at_boundaries() {
+        for (count, index, next, message) in [
+            (0, None, true, "Playback queue is empty"),
+            (1, Some(0), true, "No next track"),
+            (1, Some(0), false, "No previous track"),
+            (3, Some(2), true, "No next track"),
+            (3, Some(0), false, "No previous track"),
+        ] {
+            let error = validate_queue_step(count, index, next).unwrap_err();
+            assert!(error.is::<headless_ui::Feedback>());
+            assert!(error.to_string().contains(message));
+        }
+        assert!(validate_queue_step(3, Some(1), true).is_ok());
+        assert!(validate_queue_step(3, Some(1), false).is_ok());
+    }
+
+    #[test]
+    fn playback_errors_include_mpv_details_without_signed_urls() {
+        let mut log = tempfile::NamedTempFile::new().unwrap();
+        writeln!(log, "[ffmpeg] HTTP error 403 Forbidden").unwrap();
+        writeln!(log, "Failed to open https://example.com/audio?token=secret").unwrap();
+        let error = playback_diagnostic(anyhow::anyhow!("mpv exited with status 2"), log.path());
+        let message = error.to_string();
+        assert!(message.contains("mpv exited with status 2"));
+        assert!(message.contains("403 Forbidden"));
+        assert!(message.contains("[stream URL]"));
+        assert!(!message.contains("token=secret"));
+    }
+
+    #[test]
+    fn empty_mpv_diagnostics_preserve_original_error() {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let error = playback_diagnostic(anyhow::anyhow!("startup failed"), log.path());
+        assert_eq!(error.to_string(), "startup failed");
+    }
 
     #[test]
     fn progress_keeps_duration_when_identity_arrives_after_snapshot() {

@@ -216,6 +216,9 @@ async fn resolve_format(video_id: &str, format: &str) -> Result<Vec<String>> {
         "--ignore-config",
         "--no-playlist",
         "--no-warnings",
+        // YouTube can advertise signed URLs that reject playback with 403.
+        // Probe selected formats so yt-dlp can skip them and try a fallback.
+        "--check-formats",
         "--format",
         format,
         "--get-url",

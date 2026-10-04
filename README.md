@@ -636,9 +636,19 @@ Account-restricted tracks are not supported.
 
 InnerTube is unofficial and may change. Stream extraction relies on a current
 yt-dlp installation. Dymus deliberately ignores user yt-dlp and mpv configuration
-so unrelated player options cannot alter its behavior. If playback fails, run
+so unrelated player options cannot alter its behavior. Stream lookup checks that
+the selected formats are downloadable before passing their URLs to mpv, allowing
+yt-dlp to skip unusable formats. If playback fails, run
 `dymus doctor`, update yt-dlp through your package manager, and try another
 track. Dymus targets Linux and uses Unix sockets for mpv IPC.
+
+Headless commands explain empty searches, libraries, and collections and suggest
+what to try next. Playback failures include mpv's diagnostics with stream URLs
+redacted, plus recovery guidance for rejected streams, sign-in, connection,
+timeout, and missing-tool errors. `dymus control status` succeeds with a
+“No headless player is running” message when idle; playback and control failures
+still exit with a nonzero status. JSON listings retain their machine-readable
+output, including empty arrays.
 
 ## Contributing
 

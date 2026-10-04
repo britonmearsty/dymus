@@ -222,8 +222,36 @@ enum LastFmCommand {
     Logout,
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    let feedback = matches!(
+        &cli.command,
+        Some(
+            Command::Search { json: false, .. }
+                | Command::Play { .. }
+                | Command::Control { .. }
+                | Command::Download { .. }
+                | Command::Local { json: false, .. }
+        )
+    );
+    match execute(cli) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) if error.is::<headless_ui::Cancelled>() => {
+            println!("Cancelled.");
+            std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            if feedback {
+                let _ = headless_ui::report_error(&error);
+            } else {
+                eprintln!("Error: {error:#}");
+            }
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn execute(cli: Cli) -> Result<()> {
     // The background worker handles asynchronous I/O and needs no CPU-sized pool.
     let mut runtime = if matches!(
         &cli.command,
@@ -233,13 +261,7 @@ fn main() -> Result<()> {
     } else {
         tokio::runtime::Builder::new_multi_thread()
     };
-    match runtime.enable_all().build()?.block_on(run(cli)) {
-        Err(error) if error.is::<headless_ui::Cancelled>() => {
-            println!("Cancelled.");
-            Ok(())
-        }
-        result => result,
-    }
+    runtime.enable_all().build()?.block_on(run(cli))
 }
 
 async fn run(cli: Cli) -> Result<()> {
@@ -284,6 +306,20 @@ async fn run(cli: Cli) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&library)?);
             } else {
+                if library.collections.is_empty() {
+                    headless_ui::print_empty(
+                        "No local media found",
+                        if query
+                            .as_deref()
+                            .is_some_and(|query| !query.trim().is_empty())
+                        {
+                            "No local tracks or collections match your search."
+                        } else {
+                            "No downloaded or imported media is available."
+                        },
+                        "Try a shorter query, use `dymus local --path /path/to/music`, or download a track with `dymus download song`.",
+                    )?;
+                }
                 for collection in &library.collections {
                     println!(
                         "{} · {} · {} track(s) · {}\n  id: {}",

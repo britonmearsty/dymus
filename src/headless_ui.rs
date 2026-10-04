@@ -22,6 +22,163 @@ impl fmt::Display for Cancelled {
 }
 impl std::error::Error for Cancelled {}
 
+#[derive(Clone, Debug)]
+pub struct Feedback {
+    title: String,
+    detail: String,
+    hint: String,
+    empty: bool,
+}
+
+impl Feedback {
+    pub fn empty(
+        title: impl Into<String>,
+        detail: impl Into<String>,
+        hint: impl Into<String>,
+    ) -> Self {
+        Self {
+            title: title.into(),
+            detail: detail.into(),
+            hint: hint.into(),
+            empty: true,
+        }
+    }
+
+    fn from_error(error: &anyhow::Error) -> Self {
+        if let Some(feedback) = error.downcast_ref::<Self>() {
+            return feedback.clone();
+        }
+        let detail = format!("{error:#}");
+        let lower = detail.to_lowercase();
+        let network = error
+            .chain()
+            .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+            .any(|cause| cause.is_connect());
+        let timeout = error
+            .chain()
+            .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+            .any(|cause| cause.is_timeout());
+        let status = error
+            .chain()
+            .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+            .find_map(reqwest::Error::status);
+        let (title, hint) = if status == Some(reqwest::StatusCode::FORBIDDEN)
+            || lower.contains("403 forbidden")
+            || lower.contains("http error 403")
+        {
+            (
+                "YouTube rejected the stream",
+                "Update yt-dlp and retry. If the track still fails, try another track or refresh your sign-in with `dymus auth browser`.",
+            )
+        } else if lower.contains("sign in") && lower.contains("bot") {
+            (
+                "YouTube needs a browser session",
+                "Sign in with `dymus auth browser`, then retry.",
+            )
+        } else if status == Some(reqwest::StatusCode::UNAUTHORIZED)
+            || lower.contains("401 unauthorized")
+            || lower.contains("requires sign-in")
+            || lower.contains("credentials")
+            || lower.contains("auth file")
+            || lower.contains("saved youtube cookie")
+        {
+            (
+                "YouTube sign-in needs attention",
+                "Sign in again with `dymus auth browser` or `dymus auth paste`, then retry.",
+            )
+        } else if timeout || lower.contains("timed out") || lower.contains("did not start within") {
+            (
+                "The request took too long",
+                "Check your connection and retry, or choose another track.",
+            )
+        } else if network
+            || lower.contains("failed to resolve")
+            || lower.contains("network is unreachable")
+        {
+            (
+                "Could not reach the music service",
+                "Check your internet connection and retry.",
+            )
+        } else if ["mpv", "yt-dlp", "ffmpeg", "ffprobe"]
+            .iter()
+            .any(|tool| lower.contains(&format!("cannot start {tool}")))
+        {
+            (
+                "A required playback or download tool is unavailable",
+                "Run `dymus doctor`, install or repair the missing tool, then retry.",
+            )
+        } else if lower.contains("local path does not exist")
+            || lower.contains("local media is missing")
+        {
+            (
+                "Local media is unavailable",
+                "Check the file or directory path, or run `dymus local --json` to see available collections.",
+            )
+        } else if lower.contains("mpv exited") || lower.contains("mpv could not play") {
+            (
+                "Playback could not start",
+                "Try another track. If playback keeps failing, run `dymus doctor` and check the player error above.",
+            )
+        } else {
+            (
+                "Could not complete the request",
+                "Check the details above and retry.",
+            )
+        };
+        Self {
+            title: title.into(),
+            detail,
+            hint: hint.into(),
+            empty: false,
+        }
+    }
+}
+
+impl fmt::Display for Feedback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {} {}", self.title, self.detail, self.hint)
+    }
+}
+impl std::error::Error for Feedback {}
+
+fn feedback_text(feedback: &Feedback) -> String {
+    // Preserve the complete explanation in pipes and narrow terminals. Strip
+    // terminal controls and signed URLs before displaying external diagnostics.
+    let safe = |text: &str| {
+        clean(text)
+            .split_whitespace()
+            .map(|word| {
+                if word.contains("https://") || word.contains("http://") {
+                    "[stream URL]"
+                } else {
+                    word
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    format!(
+        "\n  {}: {}\n  {}\n\n  {}\n\n",
+        if feedback.empty {
+            "Nothing to show"
+        } else {
+            "Error"
+        },
+        safe(&feedback.title),
+        safe(&feedback.detail),
+        safe(&feedback.hint)
+    )
+}
+
+pub fn report_error(error: &anyhow::Error) -> io::Result<()> {
+    io::stderr().write_all(feedback_text(&Feedback::from_error(error)).as_bytes())
+}
+
+pub fn print_empty(title: &str, detail: &str, hint: &str) -> Result<()> {
+    io::stdout().write_all(feedback_text(&Feedback::empty(title, detail, hint)).as_bytes())?;
+    Ok(())
+}
+
 /// A small inline region: no alternate screen, no accumulated progress log.
 #[derive(Default)]
 pub struct Block {
@@ -191,19 +348,12 @@ impl Flow {
         if interactive {
             self.block.clear()?;
         }
-        if result.is_err()
-            && !result
-                .as_ref()
-                .err()
-                .is_some_and(|error| error.is::<Cancelled>())
-        {
-            self.block.draw(&[Row {
-                text: title.into(),
-                color: Color::Red,
-                bold: false,
-            }])?;
-        }
-        result
+        result.with_context(|| format!("{title} failed"))
+    }
+
+    pub fn empty<T>(&mut self, title: &str, detail: &str, hint: &str) -> Result<T> {
+        self.block.clear()?;
+        Err(Feedback::empty(title, detail, hint).into())
     }
 
     pub fn choose<T: Clone>(
@@ -212,11 +362,17 @@ impl Flow {
         choices: &[T],
         describe: impl Fn(&T) -> String,
     ) -> Result<T> {
+        if choices.is_empty() {
+            return self.empty(
+                "No choices available",
+                title,
+                "Try another search or collection.",
+            );
+        }
         ensure!(
             io::stdin().is_terminal() && io::stdout().is_terminal(),
-            "{title} requires an interactive terminal"
+            "{title} requires an interactive terminal; run this command directly in a terminal without piping its input or output"
         );
-        ensure!(!choices.is_empty(), "No choices available");
         let digits = choices.len().to_string().len();
         let descriptions: Vec<_> = choices.iter().map(&describe).collect();
         let rows = descriptions
@@ -495,6 +651,87 @@ fn line(text: &str, color: Color) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn empty_feedback_survives_loading_context() {
+        let error = anyhow::Error::new(Feedback::empty(
+            "No playlists found",
+            "Nothing matched your query.",
+            "Try another title.",
+        ))
+        .context("Search playlists failed");
+        let text = feedback_text(&Feedback::from_error(&error));
+        assert!(text.contains("Nothing to show: No playlists found"));
+        assert!(text.contains("Nothing matched your query."));
+        assert!(text.contains("Try another title."));
+        assert!(!text.contains("Error:"));
+    }
+
+    #[test]
+    fn failures_keep_the_cause_and_offer_specific_recovery() {
+        for (cause, title, hint) in [
+            (
+                "HTTP error 403 Forbidden",
+                "YouTube rejected the stream",
+                "Update yt-dlp",
+            ),
+            (
+                "Library requires sign-in",
+                "YouTube sign-in needs attention",
+                "dymus auth browser",
+            ),
+            (
+                "Failed to resolve www.youtube.com",
+                "Could not reach the music service",
+                "internet connection",
+            ),
+            (
+                "Stream lookup timed out",
+                "The request took too long",
+                "retry",
+            ),
+            (
+                "Cannot start mpv",
+                "A required playback or download tool is unavailable",
+                "dymus doctor",
+            ),
+            (
+                "Local path does not exist: /music",
+                "Local media is unavailable",
+                "Check the file or directory path",
+            ),
+        ] {
+            let error = anyhow::anyhow!(cause).context("Prepare playback failed");
+            let text = feedback_text(&Feedback::from_error(&error));
+            assert!(text.contains(title));
+            assert!(text.contains(cause));
+            assert!(text.contains(hint));
+            assert!(text.contains("Prepare playback failed"));
+        }
+    }
+
+    #[test]
+    fn feedback_preserves_long_details_and_removes_urls_and_controls() {
+        let cause = format!(
+            "HTTP error 403 Forbidden\nhttps://example.com/audio?token=secret\x1b[2J {}",
+            "details ".repeat(100)
+        );
+        let text = feedback_text(&Feedback::from_error(&anyhow::anyhow!(cause)));
+        assert!(text.contains("403 Forbidden"));
+        assert!(text.contains("[stream URL]"));
+        assert!(!text.contains("token=secret"));
+        assert!(!text.contains('\x1b'));
+        assert_eq!(text.matches("details").count(), 100);
+    }
+
+    #[tokio::test]
+    async fn loading_context_preserves_cancellation() {
+        let mut flow = Flow::new("Test", "");
+        let error = flow
+            .load::<()>("Load tracks", "", async { Err(Cancelled.into()) })
+            .await
+            .unwrap_err();
+        assert!(error.is::<Cancelled>());
+    }
     #[test]
     fn playback_card_is_compact_safe_and_adapts_to_terminal_width() {
         let view = PlaybackView {
