@@ -1112,6 +1112,7 @@ impl App {
                 if had_marks {
                     self.queue_marks = moved;
                 }
+                self.preload_next();
             }
             KeyCode::Char('n') => {
                 self.cancel_radio();
@@ -1312,11 +1313,13 @@ impl App {
             }
             ClearQueue => {
                 self.cancel_radio();
+                self.repeat_history.clear();
                 self.queue.upcoming.clear();
                 self.queue_marks.clear();
             }
             Remove => {
                 self.cancel_radio();
+                self.repeat_history.clear();
                 self.queue.remove_indices(&indices);
                 self.queue_marks.clear();
             }
@@ -1357,6 +1360,8 @@ impl App {
             _ => {}
         }
         self.clamp_queue_selection();
+        self.preload_next();
+        self.mpris_can_go_next();
     }
 
     fn replace_and_play(&mut self, tracks: Vec<Track>) {
@@ -1364,6 +1369,7 @@ impl App {
             return;
         }
         self.queue.upcoming = tracks.into();
+        self.repeat_history.clear();
         self.queue_marks.clear();
         self.result_marks.clear();
         self.queue_state.select(None);
@@ -2051,15 +2057,28 @@ impl App {
         self.player.video = !self.player.video;
         // An explicit audio choice also hides local video windows.
         self.player.local_video = self.player.video;
+        self.player.repeat_track = self.repeat_mode == RepeatMode::Track;
         if let Some(track) = self.queue.current.clone()
-            && matches!(self.playback, Playback::Playing | Playback::Paused)
+            && matches!(
+                self.playback,
+                Playback::Playing | Playback::Paused | Playback::Loading | Playback::Failed
+            )
         {
-            self.video_resume = Some((self.position, self.playback == Playback::Paused));
-            self.listening.discontinuity();
-            self.generation += 1;
-            self.playback = Playback::Loading;
-            self.player.play(self.generation, track.id, self.volume);
-            self.preload_next();
+            if matches!(self.playback, Playback::Playing | Playback::Paused)
+                || self.video_resume.is_some()
+            {
+                let (position, paused) = *self
+                    .video_resume
+                    .get_or_insert((self.position, self.playback == Playback::Paused));
+                self.listening.discontinuity();
+                self.generation += 1;
+                self.playback = Playback::Loading;
+                self.player
+                    .play_from(self.generation, track.id, self.volume, position, paused);
+                self.preload_next();
+            } else {
+                self.start_track(track, false);
+            }
         }
         self.notice(
             if self.player.video {
@@ -2072,13 +2091,18 @@ impl App {
     }
 
     fn play(&mut self, track: Track) {
+        self.repeat_history.clear();
+        self.start_track(track, false);
+    }
+
+    fn start_track(&mut self, track: Track, reuse_player: bool) {
         self.video_resume = None;
         self.generation += 1;
         self.position = 0.0;
         self.history_reported = false;
         self.lastfm_reported = false;
         self.lastfm_started_at = None;
-        self.repeat_history.clear();
+        self.listening = crate::lastfm::Listening::default();
         self.duration = 0.0;
         self.playback = Playback::Loading;
         self.audio_bands.clear();
@@ -2089,8 +2113,14 @@ impl App {
         self.audio_capture_error = None;
         self.spectrogram_history.clear();
         self.clear_toast();
-        self.player
-            .play(self.generation, track.id.clone(), self.volume);
+        self.player.repeat_track = self.repeat_mode == RepeatMode::Track;
+        if reuse_player {
+            self.player
+                .advance(self.generation, track.id.clone(), self.volume);
+        } else {
+            self.player
+                .play(self.generation, track.id.clone(), self.volume);
+        }
         self.queue.current = Some(track);
         self.preload_next();
         self.mpris_update_track();
@@ -2309,27 +2339,19 @@ impl App {
         if let Some(track) = self.queue.advance() {
             self.play(track);
         } else {
-            self.generation += 1;
-            self.player.stop();
-            self.playback = Playback::Idle;
-            self.position = 0.0;
-            self.duration = 0.0;
-            self.clear_toast();
-            self.cover_art = None;
-            self.cover_loading = false;
-            if let Some(task) = self.cover_task.take() {
-                task.abort();
-            }
-            self.mpris_update(mpris::Update::Status(mpris::PlaybackStatus::Stopped));
-            self.mpris_update(mpris::Update::Position { seconds: 0.0 });
-            self.mpris_can_go_next();
+            self.stop();
         }
     }
 
-    /// Advances only Dymus's queue after mpv has already moved onto its
-    /// preloaded playlist item. Starting another Player here would tear down
-    /// mpv and reintroduce the gap we just avoided.
+    /// Dymus chooses the next entry after EOF and reuses the existing mpv
+    /// process. Missing or invalidated preloads fall back to fresh resolution.
     fn advance_from_player(&mut self) {
+        if self.repeat_mode == RepeatMode::Track
+            && let Some(track) = self.queue.current.clone()
+        {
+            self.start_track(track, true);
+            return;
+        }
         self.queue_marks = self
             .queue_marks
             .iter()
@@ -2343,56 +2365,25 @@ impl App {
                 self.queue
                     .upcoming
                     .extend(std::mem::take(&mut self.repeat_history));
-                if let Some(track) = self.queue.advance() {
-                    self.play(track);
-                    return;
-                }
             }
         }
-        if self.queue.advance().is_some() {
-            self.position = 0.0;
-            self.history_reported = false;
-            self.lastfm_reported = false;
-            self.lastfm_started_at = None;
-            self.duration = 0.0;
-            self.playback = Playback::Loading;
-            self.audio_bands.clear();
-            self.audio_waveform.clear();
-            self.audio_scope.clear();
-            self.audio_rms = 0.0;
-            self.audio_available = false;
-            self.audio_capture_error = None;
-            self.spectrogram_history.clear();
-            self.clear_toast();
-            self.preload_next();
-            self.mpris_update_track();
-            self.mpris_can_go_next();
-            if self.now_playing_view {
-                self.request_cover();
-                if self.now_panel == NowPanel::Lyrics {
-                    self.request_lyrics();
-                }
-            }
+        if let Some(track) = self.queue.advance() {
+            self.start_track(track, true);
         } else {
-            self.player.stop();
-            self.playback = Playback::Idle;
-            self.position = 0.0;
-            self.duration = 0.0;
-            self.clear_toast();
-            self.cover_art = None;
-            self.cover_loading = false;
-            if let Some(task) = self.cover_task.take() {
-                task.abort();
-            }
-            self.mpris_update(mpris::Update::Status(mpris::PlaybackStatus::Stopped));
-            self.mpris_update(mpris::Update::Position { seconds: 0.0 });
-            self.mpris_can_go_next();
+            self.finish_playback();
         }
+        self.clamp_queue_selection();
     }
 
     fn preload_next(&mut self) {
-        if let Some(track) = self.queue.upcoming.front() {
+        if matches!(
+            self.playback,
+            Playback::Playing | Playback::Paused | Playback::Loading
+        ) && let Some(track) = self.queue.upcoming.front()
+        {
             self.player.preload(self.generation, track.id.clone());
+        } else {
+            self.player.clear_preloaded();
         }
     }
 
@@ -2412,6 +2403,7 @@ impl App {
 
     fn expire_toast(&mut self) {
         if let Some(toast) = &self.toast
+            && !(self.playback == Playback::Failed && toast.kind == ToastKind::Error)
             && toast.shown_at.elapsed() > toast.duration
         {
             self.toast = None;
@@ -2533,24 +2525,43 @@ impl App {
 
     fn stop(&mut self) {
         self.cancel_radio();
+        self.finish_playback();
+    }
+
+    fn finish_playback(&mut self) {
         self.generation += 1;
         self.player.stop();
+        self.video_resume = None;
+        self.listening.discontinuity();
         self.playback = Playback::Idle;
         self.position = 0.0;
         self.duration = 0.0;
+        self.audio_available = false;
+        self.audio_bands.clear();
+        self.audio_waveform.clear();
+        self.audio_scope.clear();
+        self.spectrogram_history.clear();
         self.clear_toast();
         self.cover_art = None;
         self.cover_loading = false;
         if let Some(task) = self.cover_task.take() {
             task.abort();
         }
+        if let Some(task) = self.lyrics_task.take() {
+            task.abort();
+        }
+        self.lyrics_loading = false;
         self.mpris_update(mpris::Update::Status(mpris::PlaybackStatus::Stopped));
         self.mpris_update(mpris::Update::Position { seconds: 0.0 });
         self.mpris_can_go_next();
     }
 
     fn set_repeat_mode(&mut self, mode: RepeatMode) {
+        if self.repeat_mode != mode {
+            self.repeat_history.clear();
+        }
         self.repeat_mode = mode;
+        self.player.repeat_track = mode == RepeatMode::Track;
         self.player.command(json!([
             "set_property",
             "loop-file",
@@ -2571,6 +2582,7 @@ impl App {
     fn set_shuffle(&mut self, on: bool) {
         if on && !self.shuffle_enabled {
             self.player.clear_preloaded();
+            self.queue_marks.clear();
             let seed = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |time| time.as_nanos() as u64);
@@ -2591,17 +2603,16 @@ impl App {
             return;
         }
         match event {
+            Event::Loaded if self.playback != Playback::Loading => {}
             Event::Loaded if self.video_resume.is_some() => {
                 let (position, paused) = self.video_resume.take().unwrap();
-                self.player
-                    .command(json!(["seek", position, "absolute+exact"]));
-                self.player
-                    .command(json!(["set_property", "pause", paused]));
+                self.position = position;
                 self.playback = if paused {
                     Playback::Paused
                 } else {
                     Playback::Playing
                 };
+                self.mpris_update(mpris::Update::Status(self.mpris_playback_status()));
             }
             Event::Loaded => {
                 self.listening = crate::lastfm::Listening::default();
@@ -2609,9 +2620,10 @@ impl App {
                 self.lastfm_reported = false;
                 self.history_reported = false;
                 self.playback = Playback::Playing;
+                self.mpris_update(mpris::Update::Status(mpris::PlaybackStatus::Playing));
                 self.start_lastfm();
             }
-            Event::Position(position) => {
+            Event::Position(position) if position.is_finite() && position >= 0.0 => {
                 self.listening
                     .sample(position, Instant::now(), self.playback == Playback::Playing);
                 self.position = position;
@@ -2619,10 +2631,11 @@ impl App {
                 self.maybe_report_history();
                 self.maybe_scrobble_lastfm();
             }
-            Event::Duration(duration) => {
+            Event::Duration(duration) if duration.is_finite() && duration > 0.0 => {
                 self.duration = duration;
                 self.mpris_update(mpris::Update::Duration { seconds: duration });
             }
+            Event::Position(_) | Event::Duration(_) => {}
             Event::AudioFrame(frame) => {
                 if self.audio_bands.len() == frame.bands.len() {
                     for (current, target) in self.audio_bands.iter_mut().zip(frame.bands) {
@@ -2667,18 +2680,18 @@ impl App {
             Event::Ended => self.advance_from_player(),
             Event::Notice(message) => self.notice(message, ToastKind::Info),
             Event::Error(error) => {
+                self.player.stop();
+                self.generation += 1;
+                self.video_resume = None;
+                self.listening.discontinuity();
+                self.audio_available = false;
                 self.playback = Playback::Failed;
                 self.mpris_update(mpris::Update::Status(mpris::PlaybackStatus::Stopped));
-                let lower = error.to_ascii_lowercase();
                 self.notice(
-                    if lower.contains("sign in to confirm")
-                        || lower.contains("not a bot")
-                        || lower.contains("authentication")
-                    {
-                        "YouTube requires a fresh signed-in session — visit YouTube Music in your browser, then run `dymus auth paste` · r to retry, n to skip".into()
-                    } else {
-                        format!("{error} · r to retry, n to skip")
-                    },
+                    format!(
+                        "{} retry · {} skip · V audio/video\n{error}",
+                        self.config.keybindings.retry_track, self.config.keybindings.next_track
+                    ),
                     ToastKind::Error,
                 );
             }
@@ -2995,6 +3008,139 @@ mod tests {
         app.queue.upcoming.push_back(track("old"));
         app.playback = Playback::Playing;
         app
+    }
+
+    #[tokio::test]
+    async fn eof_re_resolves_unprepared_next_and_rejects_old_track_events() {
+        let mut app = populated_app().await;
+        app.queue.upcoming = [track("local:/missing/next.wav"), track("later")].into();
+        let old = app.generation;
+        app.on_player_event(old, Event::Ended);
+        assert_eq!(
+            app.queue.current.as_ref().unwrap().id,
+            "local:/missing/next.wav"
+        );
+        assert_eq!(app.playback, Playback::Loading);
+        assert!(app.generation > old);
+        app.on_player_event(old, Event::Loaded);
+        app.on_player_event(old, Event::Ended);
+        app.on_player_event(old, Event::Error("old stream failed".into()));
+        assert_eq!(app.playback, Playback::Loading);
+        assert_eq!(app.queue.upcoming, [track("later")]);
+    }
+
+    #[tokio::test]
+    async fn rapid_video_toggles_preserve_resume_and_restart_pending_resolution() {
+        let mut app = populated_app().await;
+        app.position = 42.5;
+        app.playback = Playback::Paused;
+        app.toggle_video();
+        let generation = app.generation;
+        app.toggle_video();
+        assert!(!app.player.video);
+        assert_eq!(app.video_resume, Some((42.5, true)));
+        assert_eq!(app.generation, generation + 1);
+        app.on_player_event(generation, Event::Loaded);
+        assert_eq!(app.playback, Playback::Loading);
+        app.on_player_event(app.generation, Event::Loaded);
+        assert_eq!(app.playback, Playback::Paused);
+        assert_eq!(app.position, 42.5);
+
+        app.playback = Playback::Loading;
+        app.video_resume = None;
+        let generation = app.generation;
+        app.toggle_video();
+        assert!(app.player.video);
+        assert_eq!(app.generation, generation + 1);
+        assert!(app.video_resume.is_none());
+    }
+
+    #[tokio::test]
+    async fn failures_stop_work_keep_the_queue_and_remain_visible_until_recovery() {
+        let mut app = populated_app().await;
+        let generation = app.generation;
+        app.video_resume = Some((20.0, true));
+        app.on_player_event(generation, Event::Error("HTTP error 403 Forbidden".into()));
+        assert_eq!(app.playback, Playback::Failed);
+        assert!(app.video_resume.is_none());
+        assert_eq!(app.queue.upcoming, [track("old")]);
+        app.on_player_event(generation, Event::Loaded);
+        app.on_player_event(generation, Event::Ended);
+        assert_eq!(app.playback, Playback::Failed);
+        app.toast.as_mut().unwrap().shown_at = Instant::now() - Duration::from_secs(60);
+        app.expire_toast();
+        assert!(app.toast.is_some());
+        for (width, height) in [(100, 30), (32, 12), (12, 5)] {
+            let backend = ratatui::backend::TestBackend::new(width, height);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| crate::ui::draw(frame, &mut app))
+                .unwrap();
+            if width == 100 {
+                let text: String = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect();
+                assert!(text.contains("retry"));
+                assert!(text.contains("skip"));
+            }
+        }
+        app.toggle_video();
+        assert_eq!(app.playback, Playback::Loading);
+        assert_eq!(app.queue.current.as_ref().unwrap().id, "playing");
+    }
+
+    #[tokio::test]
+    async fn repeat_cycles_do_not_lose_tracks_or_resurrect_cleared_entries() {
+        let mut app = populated_app().await;
+        app.set_repeat_mode(RepeatMode::Queue);
+        app.queue.current = Some(track("first"));
+        app.queue.upcoming = [track("second")].into();
+        app.on_player_event(app.generation, Event::Ended);
+        assert_eq!(app.queue.current, Some(track("second")));
+        assert_eq!(app.repeat_history, [track("first")]);
+        app.on_player_event(app.generation, Event::Loaded);
+        app.on_player_event(app.generation, Event::Ended);
+        assert_eq!(app.queue.current, Some(track("first")));
+        assert_eq!(app.queue.upcoming, [track("second")]);
+        app.repeat_history.push(track("removed"));
+        app.execute(Action::ClearQueue);
+        assert!(app.repeat_history.is_empty());
+        app.set_repeat_mode(RepeatMode::Track);
+        app.play(track("local:/missing/repeated.wav"));
+        assert!(app.player.repeat_track);
+    }
+
+    #[tokio::test]
+    async fn ended_playback_preserves_pending_radio_but_explicit_stop_cancels_it() {
+        let mut app = populated_app().await;
+        app.queue.upcoming.clear();
+        app.radio_task = Some(tokio::spawn(std::future::pending()));
+        app.on_player_event(app.generation, Event::Ended);
+        assert_eq!(app.playback, Playback::Idle);
+        assert!(app.radio_task.is_some());
+        app.stop();
+        assert!(app.radio_task.is_none());
+    }
+
+    #[tokio::test]
+    async fn invalid_timing_samples_and_duplicate_load_events_do_not_reset_reporting() {
+        let mut app = populated_app().await;
+        app.position = 3.0;
+        app.duration = 180.0;
+        app.history_reported = true;
+        app.lastfm_reported = true;
+        for value in [f64::NAN, f64::INFINITY, -1.0] {
+            app.on_player_event(app.generation, Event::Position(value));
+            app.on_player_event(app.generation, Event::Duration(value));
+        }
+        app.on_player_event(app.generation, Event::Loaded);
+        assert_eq!(app.position, 3.0);
+        assert_eq!(app.duration, 180.0);
+        assert!(app.history_reported && app.lastfm_reported);
     }
 
     #[tokio::test]
