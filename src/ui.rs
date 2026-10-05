@@ -627,19 +627,31 @@ fn toast(frame: &mut Frame, app: &App, area: Rect) {
     let Some(toast) = &app.toast else {
         return;
     };
-    let width = (area.width / 2).clamp(24, 72);
+    let error = toast.kind == ToastKind::Error;
+    let width = if error {
+        area.width.min(88)
+    } else {
+        (area.width / 2).clamp(24, 72).min(area.width)
+    };
+    let height = if error {
+        8.min(area.bottom().saturating_sub(frame.area().y))
+    } else {
+        1
+    };
     let rect = Rect {
         x: area.right().saturating_sub(width).max(area.left()),
-        y: area.bottom().saturating_sub(1),
+        y: area.bottom().saturating_sub(height),
         width,
-        height: 1,
+        height,
     };
     frame.render_widget(Clear, rect);
     frame.render_widget(
-        Paragraph::new(toast.message.as_str()).style(Style::default().fg(match toast.kind {
-            ToastKind::Info => secondary_color(),
-            ToastKind::Error => error_color(),
-        })),
+        Paragraph::new(toast.message.as_str())
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(match toast.kind {
+                ToastKind::Info => secondary_color(),
+                ToastKind::Error => error_color(),
+            })),
         rect,
     );
 }

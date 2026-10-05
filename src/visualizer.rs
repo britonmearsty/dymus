@@ -118,7 +118,7 @@ fn fft(values: &mut [(f32, f32)]) {
     }
 }
 
-pub fn find_dymus_node(dump: &[u8]) -> Option<String> {
+pub fn find_dymus_node(dump: &[u8], process_id: u32) -> Option<String> {
     let objects: Value = serde_json::from_slice(dump).ok()?;
     objects.as_array()?.iter().find_map(|object| {
         let props = object.get("info")?.get("props")?;
@@ -130,7 +130,11 @@ pub fn find_dymus_node(dump: &[u8]) -> Option<String> {
             .get("media.class")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        let owner = props
+            .get("application.process.id")
+            .and_then(|value| value.as_u64().or_else(|| value.as_str()?.parse().ok()));
         if application.eq_ignore_ascii_case("Dymus")
+            && owner == Some(u64::from(process_id))
             && (class.is_empty() || class == "Stream/Output/Audio")
         {
             props
@@ -161,9 +165,12 @@ mod tests {
     fn extracts_only_the_dymus_playback_node() {
         let dump = br#"[
           {"id": 7, "type": "PipeWire:Interface:Node", "info": {"props": {"object.serial": "107", "node.name": "other", "application.name": "Other", "media.class": "Stream/Output/Audio"}}},
-          {"id": 42, "type": "PipeWire:Interface:Node", "info": {"props": {"object.serial": "1042", "node.name": "dymus-out", "application.name": "Dymus", "media.class": "Stream/Output/Audio"}}}
+          {"id": 41, "type": "PipeWire:Interface:Node", "info": {"props": {"object.serial": "1041", "application.name": "Dymus", "application.process.id": 99, "media.class": "Stream/Output/Audio"}}},
+          {"id": 42, "type": "PipeWire:Interface:Node", "info": {"props": {"object.serial": "1042", "node.name": "dymus-out", "application.name": "Dymus", "application.process.id": "123", "media.class": "Stream/Output/Audio"}}}
         ]"#;
-        assert_eq!(find_dymus_node(dump).as_deref(), Some("1042"));
+        assert_eq!(find_dymus_node(dump, 123).as_deref(), Some("1042"));
+        assert_eq!(find_dymus_node(dump, 99).as_deref(), Some("1041"));
+        assert!(find_dymus_node(dump, 456).is_none());
     }
 
     #[test]

@@ -229,6 +229,15 @@ an available video stream cannot play in video mode.
 `dymus search "query" --video` skips the audio/video mode prompt after choosing
 a result. Without that flag, search still lets you choose the playback mode.
 
+In the TUI, queue transitions reuse mpv while loading each track with its own
+audio and video settings. Upcoming streams are prepared in advance; queue edits
+invalidate obsolete preparations, and missing or expired preparations are
+resolved again. Switching video mode preserves the current position and pause
+state. A rejected YouTube stream is refreshed once before reporting a failure.
+Player startup and track loading have time limits. Playback errors stay visible
+with retry and skip instructions, including when the video window is closed;
+the remaining queue is kept for recovery.
+
 Without `--detach`, the command stays attached until mpv exits. Detached
 playback remains available after the shell command ends and can be controlled
 from any terminal in the same user session:

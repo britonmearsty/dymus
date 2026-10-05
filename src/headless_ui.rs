@@ -114,6 +114,15 @@ impl Feedback {
                 "Local media is unavailable",
                 "Check the file or directory path, or run `dymus local --json` to see available collections.",
             )
+        } else if lower.contains("mpv exited during playback")
+            || lower.contains("mpv player was closed")
+            || lower.contains("mpv window was closed")
+            || lower.contains("mpv player stopped playback")
+        {
+            (
+                "Playback stopped",
+                "Retry the track to reopen the player, or skip to the next track.",
+            )
         } else if lower.contains("mpv exited") || lower.contains("mpv could not play") {
             (
                 "Playback could not start",
@@ -168,6 +177,24 @@ fn feedback_text(feedback: &Feedback) -> String {
         safe(&feedback.detail),
         safe(&feedback.hint)
     )
+}
+
+pub fn error_message(error: &anyhow::Error) -> String {
+    let feedback = Feedback::from_error(error);
+    clean(&format!(
+        "{}. {} Details: {}",
+        feedback.title, feedback.hint, feedback.detail
+    ))
+    .split_whitespace()
+    .map(|word| {
+        if word.contains("https://") || word.contains("http://") {
+            "[stream URL]"
+        } else {
+            word
+        }
+    })
+    .collect::<Vec<_>>()
+    .join(" ")
 }
 
 pub fn report_error(error: &anyhow::Error) -> io::Result<()> {
