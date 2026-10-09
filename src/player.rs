@@ -499,8 +499,7 @@ async fn resolve_playback_using(
 }
 
 fn load_command(request: &LoadRequest, options: PlaybackOptions, has_index: bool) -> Value {
-    // Always set per-file audio and video options, including empty audio-files,
-    // so a combined stream or a local file cannot inherit another video's audio.
+    // Audio and video options are scoped to each loaded file.
     let mut command =
         crate::headless::append_command(&request.source, true, has_index, "Dymus video");
     command[2] = json!("replace");
@@ -912,7 +911,11 @@ async fn write_request(
     command: Value,
     request_id: Option<u64>,
 ) -> Result<()> {
-    let mut line = serde_json::to_vec(&json!({"command": command, "request_id": request_id}))?;
+    let mut message = json!({"command": command});
+    if let Some(id) = request_id {
+        message["request_id"] = json!(id);
+    }
+    let mut line = serde_json::to_vec(&message)?;
     line.push(b'\n');
     tokio::time::timeout(Duration::from_secs(2), write.write_all(&line))
         .await
@@ -961,6 +964,7 @@ def send(value): connection.sendall((json.dumps(value) + '\n').encode())
 def eof(): send({'event': 'end-file', 'reason': 'eof'})
 for line in stream:
     message = json.loads(line)
+    assert 'request_id' not in message or type(message['request_id']) is int
     command = message['command']
     response = {'request_id': message.get('request_id'), 'error': 'success'}
     if command[0] == 'get_property':
@@ -1078,8 +1082,13 @@ for line in stream:
                 r"https\://example.com/audio?a=b,c\:d"
             );
             assert_eq!(
-                loads[1]["command"].as_array().unwrap().last().unwrap()["audio-files"],
-                ""
+                loads[1]["command"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .get("audio-files"),
+                None
             );
         }
     }
