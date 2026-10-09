@@ -387,6 +387,7 @@ async fn play_tracks(
             "--no-ytdl",
             "--audio-display=no",
             "--audio-client-name=Dymus headless",
+            player::MPV_AUDIO_OUTPUT,
         ])
         .arg(format!("--input-ipc-server={}", socket.display()))
         .arg(format!("--volume={volume}"))

@@ -471,9 +471,9 @@ pub async fn run(
                     // mpv may keep an observed title unchanged when returning to or
                     // repeating a file. Refresh the stable queue tag after each load.
                     if event["event"] == "file-loaded" {
-                        write.write_all(b"{\"command\":[\"get_property\",\"media-title\"],\"request_id\":\"headless-track\"}\n").await?;
+                        write.write_all(b"{\"command\":[\"get_property\",\"media-title\"],\"request_id\":100}\n").await?;
                     }
-                    if event["request_id"] == "headless-track" && event["error"] == "success" {
+                    if event["request_id"] == 100 && event["error"] == "success" {
                         event = json!({"event":"property-change", "name":"media-title", "data":event["data"]});
                     }
                     let effects = state.event(&event, Instant::now(), auth::unix_timestamp().unwrap_or(0));

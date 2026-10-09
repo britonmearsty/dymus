@@ -20,6 +20,11 @@ use tokio::{
     task::JoinHandle,
 };
 
+// Prefer the PulseAudio interface (also provided by pipewire-pulse). Native
+// PipeWire output can be killed during initialization on some mpv/PipeWire
+// combinations. The trailing comma preserves mpv fallback on other systems.
+pub(crate) const MPV_AUDIO_OUTPUT: &str = "--ao=pulse,pipewire,";
+
 #[derive(Debug)]
 pub enum Event {
     Loaded,
@@ -587,6 +592,7 @@ async fn playback(
             "--no-ytdl",
             "--audio-display=no",
             "--audio-client-name=Dymus",
+            MPV_AUDIO_OUTPUT,
             "--autofit=640x360",
             "--ontop=no",
             "--title=Dymus video",
@@ -1592,9 +1598,19 @@ for line in stream:
     #[tokio::test]
     #[ignore = "requires mpv and permission to open a local Unix socket"]
     async fn mpv_reports_playback_and_eof_with_local_audio() {
+        local_audio_smoke(true).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires mpv, a working audio output and permission to open a local Unix socket"]
+    async fn mpv_plays_local_audio_through_system_output() {
+        local_audio_smoke(false).await;
+    }
+
+    async fn local_audio_smoke(silent: bool) {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("silence.wav");
-        // One second of mono, 8 kHz, 16-bit PCM. No audio hardware or network needed.
+        // One second of mono, 8 kHz, 16-bit PCM; no ffmpeg or network needed.
         let mut wav = Vec::new();
         wav.extend(b"RIFF");
         wav.extend(16036_u32.to_le_bytes());
@@ -1624,7 +1640,7 @@ for line in stream:
                     source,
                     resume: Resume::default(),
                 },
-                PlaybackConfig::new(0, true, PlaybackOptions::default()),
+                PlaybackConfig::new(0, silent, PlaybackOptions::default()),
                 &sender,
                 receiver,
                 Arc::new(AtomicU64::new(7)),
