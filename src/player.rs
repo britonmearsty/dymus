@@ -20,6 +20,11 @@ use tokio::{
     task::JoinHandle,
 };
 
+// Prefer the PulseAudio interface (also provided by pipewire-pulse). Native
+// PipeWire output can be killed during initialization on some mpv/PipeWire
+// combinations. The trailing comma preserves mpv fallback on other systems.
+pub(crate) const MPV_AUDIO_OUTPUT: &str = "--ao=pulse,pipewire,";
+
 #[derive(Debug)]
 pub enum Event {
     Loaded,
@@ -499,8 +504,7 @@ async fn resolve_playback_using(
 }
 
 fn load_command(request: &LoadRequest, options: PlaybackOptions, has_index: bool) -> Value {
-    // Always set per-file audio and video options, including empty audio-files,
-    // so a combined stream or a local file cannot inherit another video's audio.
+    // Audio and video options are scoped to each loaded file.
     let mut command =
         crate::headless::append_command(&request.source, true, has_index, "Dymus video");
     command[2] = json!("replace");
@@ -588,6 +592,7 @@ async fn playback(
             "--no-ytdl",
             "--audio-display=no",
             "--audio-client-name=Dymus",
+            MPV_AUDIO_OUTPUT,
             "--autofit=640x360",
             "--ontop=no",
             "--title=Dymus video",
@@ -912,7 +917,11 @@ async fn write_request(
     command: Value,
     request_id: Option<u64>,
 ) -> Result<()> {
-    let mut line = serde_json::to_vec(&json!({"command": command, "request_id": request_id}))?;
+    let mut message = json!({"command": command});
+    if let Some(id) = request_id {
+        message["request_id"] = json!(id);
+    }
+    let mut line = serde_json::to_vec(&message)?;
     line.push(b'\n');
     tokio::time::timeout(Duration::from_secs(2), write.write_all(&line))
         .await
@@ -961,6 +970,7 @@ def send(value): connection.sendall((json.dumps(value) + '\n').encode())
 def eof(): send({'event': 'end-file', 'reason': 'eof'})
 for line in stream:
     message = json.loads(line)
+    assert 'request_id' not in message or type(message['request_id']) is int
     command = message['command']
     response = {'request_id': message.get('request_id'), 'error': 'success'}
     if command[0] == 'get_property':
@@ -1078,8 +1088,13 @@ for line in stream:
                 r"https\://example.com/audio?a=b,c\:d"
             );
             assert_eq!(
-                loads[1]["command"].as_array().unwrap().last().unwrap()["audio-files"],
-                ""
+                loads[1]["command"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .get("audio-files"),
+                None
             );
         }
     }
@@ -1583,9 +1598,19 @@ for line in stream:
     #[tokio::test]
     #[ignore = "requires mpv and permission to open a local Unix socket"]
     async fn mpv_reports_playback_and_eof_with_local_audio() {
+        local_audio_smoke(true).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires mpv, a working audio output and permission to open a local Unix socket"]
+    async fn mpv_plays_local_audio_through_system_output() {
+        local_audio_smoke(false).await;
+    }
+
+    async fn local_audio_smoke(silent: bool) {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("silence.wav");
-        // One second of mono, 8 kHz, 16-bit PCM. No audio hardware or network needed.
+        // One second of mono, 8 kHz, 16-bit PCM; no ffmpeg or network needed.
         let mut wav = Vec::new();
         wav.extend(b"RIFF");
         wav.extend(16036_u32.to_le_bytes());
@@ -1615,7 +1640,7 @@ for line in stream:
                     source,
                     resume: Resume::default(),
                 },
-                PlaybackConfig::new(0, true, PlaybackOptions::default()),
+                PlaybackConfig::new(0, silent, PlaybackOptions::default()),
                 &sender,
                 receiver,
                 Arc::new(AtomicU64::new(7)),

@@ -143,6 +143,10 @@ roff diagnostics before changes can pass validation.
 
 ## Headless playback
 
+Dymus prefers mpv’s PulseAudio output, including the PulseAudio interface provided
+by PipeWire, and falls back to other outputs when unavailable. This avoids abrupt
+player termination seen with native PipeWire output on some systems.
+
 Headless search uses full YouTube through yt-dlp, including music, interviews,
 tutorials, and other videos. `dymus search "query"` shows ten results by default;
 choose a result, then choose audio-only or video playback. `--detach` and

@@ -115,7 +115,7 @@ pub(crate) fn append_command(
     has_index: bool,
     tag: &str,
 ) -> Value {
-    // Replace external audio for each entry, including combined-stream fallback.
+    // External audio is scoped to this playlist entry; omit it for combined streams.
     // mpv audio-files is a colon-separated path list on Linux.
     let audio = source
         .audio
@@ -127,7 +127,7 @@ pub(crate) fn append_command(
         command.push(json!(-1));
     }
     let mut options = json!({"force-media-title": tag});
-    if video {
+    if video && source.audio.is_some() {
         options["audio-files"] = json!(audio);
     }
     command.push(options);
@@ -387,6 +387,7 @@ async fn play_tracks(
             "--no-ytdl",
             "--audio-display=no",
             "--audio-client-name=Dymus headless",
+            player::MPV_AUDIO_OUTPUT,
         ])
         .arg(format!("--input-ipc-server={}", socket.display()))
         .arg(format!("--volume={volume}"))
@@ -1361,8 +1362,8 @@ mod tests {
             audio: None,
         };
         assert_eq!(
-            append_command(&combined, true, true, "dymus-track-1")[4]["audio-files"],
-            ""
+            append_command(&combined, true, true, "dymus-track-1")[4].get("audio-files"),
+            None
         );
         assert_eq!(
             append_command(&combined, false, false, "dymus-track-1"),
@@ -1382,7 +1383,7 @@ mod tests {
         };
         assert_eq!(
             append_command(&source, true, false, "dymus-track-1"),
-            json!(["loadfile", "video", "append-play", {"audio-files":"", "force-media-title":"dymus-track-1"}])
+            json!(["loadfile", "video", "append-play", {"force-media-title":"dymus-track-1"}])
         );
     }
 
