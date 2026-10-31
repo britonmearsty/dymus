@@ -10,7 +10,7 @@ Dymus is a keyboard-driven terminal music player. Contributions are welcome, and
 
 ## Checks
 
-CI runs on every push to `master` and on every pull request. It is there to catch problems, not to gate your push. Before pushing, it is worth running whichever checks apply to your change:
+CI does not run on ordinary pushes to `master`. It runs on pull requests and when started manually from the Actions tab. It is there to catch problems, not to gate your push. Before pushing, run whichever checks apply to your change:
 
 ```sh
 cargo fmt --check
@@ -20,7 +20,7 @@ cargo build --release --locked
 sh scripts/check-manpage.sh ./target/release/dymus
 ```
 
-The man-page check needs `groff`. Optional mpv and live-network integration tests are described in the README. If a check fails after a push, fix it in a follow-up commit — nothing is blocked.
+The man-page check needs `groff`. Optional mpv and live-network integration tests are described in the README. If a check fails, fix it in a follow-up commit — nothing is blocked.
 
 ## What makes a change a good fit
 
