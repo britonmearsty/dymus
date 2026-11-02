@@ -487,8 +487,9 @@ YouTube Music provides one. Search contains public tracks; the queue contains
 upcoming playback. Playlists, Albums, Artists, and Podcasts are separate
 top-level signed-in views.
 
-Now Playing presents the active track, cover art, and a minimal progress bar. Its
-right panel switches between queue, visualizer, and lyrics. Synced lyrics
+Now Playing presents the active track, cover art, and a solid progress bar whose
+elapsed and remaining colors can be set in `[progress]`. Its right panel switches
+between queue, visualizer, and lyrics. Synced lyrics
 distinguish elapsed, current, and upcoming lines; plain lyrics can be scrolled.
 
 ## Authentication
@@ -561,6 +562,11 @@ start_view = "home" # home, explore, playlists, albums, artists, podcasts, radio
 [colors]
 accent = "#88c0d0"
 text = "#eceff4"
+
+[progress]
+height = 1 # 1 through 4 rows
+elapsed = "#88c0d0"
+remaining = "#3b4252"
 
 [keybindings]
 settings = ";"

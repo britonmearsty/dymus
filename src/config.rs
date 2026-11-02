@@ -27,6 +27,7 @@ pub struct Config {
     pub downloads: DownloadConfig,
     pub local: LocalConfig,
     pub colors: Colors,
+    pub progress: ProgressConfig,
     pub keybindings: KeyBindings,
 }
 
@@ -44,6 +45,7 @@ impl Default for Config {
             downloads: DownloadConfig::default(),
             local: LocalConfig::default(),
             colors: Colors::default(),
+            progress: ProgressConfig::default(),
             keybindings: KeyBindings::default(),
         }
     }
@@ -153,6 +155,26 @@ pub struct Colors {
     pub error: Option<String>,
 }
 
+/// Now-playing progress bar appearance. Height is in terminal rows.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProgressConfig {
+    pub height: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining: Option<String>,
+}
+impl Default for ProgressConfig {
+    fn default() -> Self {
+        Self {
+            height: 1,
+            elapsed: None,
+            remaining: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeyBindings {
@@ -243,6 +265,8 @@ pub struct Palette {
     pub good: Color,
     pub warning: Color,
     pub error: Color,
+    pub progress_elapsed: Color,
+    pub progress_remaining: Color,
 }
 
 pub const THEMES: &[&str] = &["tokyo-night", "catppuccin-mocha", "gruvbox-dark", "nord"];
@@ -262,27 +286,31 @@ pub const START_VIEWS: &[&str] = &[
 impl Config {
     pub fn palette(&self) -> Palette {
         let base = match self.theme.as_str() {
-            "catppuccin-mocha" => Palette::rgb(
-                "cdd6f4", "bac2de", "6c7086", "cba6f7", "a6e3a1", "f9e2af", "f38ba8",
-            ),
-            "gruvbox-dark" => Palette::rgb(
-                "ebdbb2", "d5c4a1", "928374", "83a598", "b8bb26", "fabd2f", "fb4934",
-            ),
-            "nord" => Palette::rgb(
-                "eceff4", "d8dee9", "616e88", "88c0d0", "a3be8c", "ebcb8b", "bf616a",
-            ),
-            _ => Palette::rgb(
-                "c0caf5", "a9b1d6", "737aa2", "7aa2f7", "9ece6a", "e0af68", "f7768e",
-            ),
+            "catppuccin-mocha" => Palette::rgb([
+                "cdd6f4", "bac2de", "6c7086", "cba6f7", "a6e3a1", "f9e2af", "f38ba8", "313244",
+            ]),
+            "gruvbox-dark" => Palette::rgb([
+                "ebdbb2", "d5c4a1", "928374", "83a598", "b8bb26", "fabd2f", "fb4934", "3c3836",
+            ]),
+            "nord" => Palette::rgb([
+                "eceff4", "d8dee9", "616e88", "88c0d0", "a3be8c", "ebcb8b", "bf616a", "3b4252",
+            ]),
+            _ => Palette::rgb([
+                "c0caf5", "a9b1d6", "737aa2", "7aa2f7", "9ece6a", "e0af68", "f7768e", "2f3549",
+            ]),
         };
+        let accent = parse_color(self.colors.accent.as_deref()).unwrap_or(base.accent);
         Palette {
             text: parse_color(self.colors.text.as_deref()).unwrap_or(base.text),
             secondary: parse_color(self.colors.secondary.as_deref()).unwrap_or(base.secondary),
             muted: parse_color(self.colors.muted.as_deref()).unwrap_or(base.muted),
-            accent: parse_color(self.colors.accent.as_deref()).unwrap_or(base.accent),
+            accent,
             good: parse_color(self.colors.good.as_deref()).unwrap_or(base.good),
             warning: parse_color(self.colors.warning.as_deref()).unwrap_or(base.warning),
             error: parse_color(self.colors.error.as_deref()).unwrap_or(base.error),
+            progress_elapsed: parse_color(self.progress.elapsed.as_deref()).unwrap_or(accent),
+            progress_remaining: parse_color(self.progress.remaining.as_deref())
+                .unwrap_or(base.progress_remaining),
         }
     }
 
@@ -299,6 +327,7 @@ impl Config {
         self.headless_search_results = self.headless_search_results.clamp(1, 50);
         self.video_height = self.video_height.clamp(144, 4320);
         self.report_history_after_seconds = self.report_history_after_seconds.clamp(1, 3600);
+        self.progress.height = self.progress.height.clamp(1, 4);
     }
 
     pub fn load() -> Result<Self> {
@@ -338,7 +367,7 @@ impl Config {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Cannot create {}", parent.display()))?;
             let body = format!(
-                "# Dymus user configuration.\n# Available themes: tokyo-night, catppuccin-mocha, gruvbox-dark, nord.\n# Start view: home, explore, playlists, albums, artists, podcasts, radio, local, search, or queue.\n# Headless picker results: 1 through 25.\n# YouTube Music history reporting is off by default; threshold: 1 through 3600 seconds.\n# Last.fm scrobbling is on by default when Last.fm credentials exist.\n# Colors are optional six-digit hex overrides (examples below use Tokyo Night).\n# Uncomment and edit any value:\n# [colors]\n# text = \"#c0caf5\"\n# secondary = \"#a9b1d6\"\n# muted = \"#737aa2\"\n# accent = \"#7aa2f7\"\n# good = \"#9ece6a\"\n# warning = \"#e0af68\"\n# error = \"#f7768e\"\n\n{}",
+                "# Dymus user configuration.\n# Available themes: tokyo-night, catppuccin-mocha, gruvbox-dark, nord.\n# Start view: home, explore, playlists, albums, artists, podcasts, radio, local, search, or queue.\n# Headless picker results: 1 through 25.\n# YouTube Music history reporting is off by default; threshold: 1 through 3600 seconds.\n# Last.fm scrobbling is on by default when Last.fm credentials exist.\n# Colors are optional six-digit hex overrides (examples below use Tokyo Night).\n# Now-playing progress height accepts 1 through 4 rows.\n# Uncomment and edit any value:\n# [colors]\n# text = \"#c0caf5\"\n# secondary = \"#a9b1d6\"\n# muted = \"#737aa2\"\n# accent = \"#7aa2f7\"\n# good = \"#9ece6a\"\n# warning = \"#e0af68\"\n# error = \"#f7768e\"\n#\n# [progress]\n# height = 1\n# elapsed = \"#7aa2f7\"\n# remaining = \"#2f3549\"\n\n{}",
                 toml::to_string_pretty(self)?
             );
             fs::write(&path, body).with_context(|| format!("Cannot write {}", path.display()))
@@ -347,15 +376,17 @@ impl Config {
 }
 
 impl Palette {
-    fn rgb(
-        text: &str,
-        secondary: &str,
-        muted: &str,
-        accent: &str,
-        good: &str,
-        warning: &str,
-        error: &str,
-    ) -> Self {
+    fn rgb(colors: [&str; 8]) -> Self {
+        let [
+            text,
+            secondary,
+            muted,
+            accent,
+            good,
+            warning,
+            error,
+            progress_remaining,
+        ] = colors;
         Self {
             text: parse_color(Some(text)).unwrap(),
             secondary: parse_color(Some(secondary)).unwrap(),
@@ -364,6 +395,8 @@ impl Palette {
             good: parse_color(Some(good)).unwrap(),
             warning: parse_color(Some(warning)).unwrap(),
             error: parse_color(Some(error)).unwrap(),
+            progress_elapsed: parse_color(Some(accent)).unwrap(),
+            progress_remaining: parse_color(Some(progress_remaining)).unwrap(),
         }
     }
 }
@@ -473,8 +506,28 @@ mod tests {
         .unwrap();
         let palette = config.palette();
         assert_eq!(palette.accent, Color::Rgb(255, 0, 170));
+        assert_eq!(palette.progress_elapsed, Color::Rgb(255, 0, 170));
         assert_eq!(config.keybindings.quit, "x");
         assert_eq!(config.keybindings.next_track, "n");
+    }
+
+    #[test]
+    fn progress_bar_defaults_and_overrides_are_normalized() {
+        let config: Config =
+            toml::from_str("[progress]\nheight = 3\nelapsed = '#112233'\nremaining = '#445566'\n")
+                .unwrap();
+        assert_eq!(config.progress.height, 3);
+        let palette = config.palette();
+        assert_eq!(palette.progress_elapsed, Color::Rgb(0x11, 0x22, 0x33));
+        assert_eq!(palette.progress_remaining, Color::Rgb(0x44, 0x55, 0x66));
+        let mut config = Config::default();
+        assert_eq!(config.progress.height, 1);
+        config.progress.height = 0;
+        config.normalize();
+        assert_eq!(config.progress.height, 1);
+        config.progress.height = 9;
+        config.normalize();
+        assert_eq!(config.progress.height, 4);
     }
 
     #[test]

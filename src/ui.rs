@@ -39,6 +39,12 @@ fn warning_color() -> Color {
 fn error_color() -> Color {
     ACTIVE_PALETTE.with(|palette| palette.get().error)
 }
+fn progress_elapsed_color() -> Color {
+    ACTIVE_PALETTE.with(|palette| palette.get().progress_elapsed)
+}
+fn progress_remaining_color() -> Color {
+    ACTIVE_PALETTE.with(|palette| palette.get().progress_remaining)
+}
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     ACTIVE_PALETTE.with(|palette| palette.set(app.config.palette()));
@@ -669,34 +675,15 @@ fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Min(0),
     ])
     .split(layout[0]);
+    let progress_height = app.config.progress.height.clamp(1, 4);
     let left = Layout::vertical([
+        Constraint::Length(2),
         Constraint::Length(1),
-        Constraint::Length(3),
         Constraint::Min(3),
-        Constraint::Length(1),
+        Constraint::Length(progress_height),
         Constraint::Length(1),
     ])
     .split(panes[0]);
-    let right = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(1),
-    ])
-    .split(panes[2]);
-    let (play_icon, play_color) = match app.playback {
-        Playback::Loading => ("…", warning_color()),
-        Playback::Paused => ("Ⅱ", warning_color()),
-        Playback::Failed => ("!", error_color()),
-        Playback::Playing => ("▶", good_color()),
-        Playback::Idle => ("·", muted_color()),
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(play_icon, Style::default().fg(play_color)),
-            Span::styled("  now playing", Style::default().fg(text_color())),
-        ])),
-        left[0],
-    );
     if let Some(track) = app.queue.current.as_ref() {
         frame.render_widget(
             Paragraph::new(vec![
@@ -708,14 +695,12 @@ fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 )),
                 Line::from(Span::styled(
                     track.artist.as_str(),
-                    Style::default().fg(secondary_color()),
-                )),
-                Line::from(Span::styled(
-                    track.album.as_str(),
-                    Style::default().fg(muted_color()),
+                    Style::default()
+                        .fg(secondary_color())
+                        .add_modifier(Modifier::ITALIC),
                 )),
             ]),
-            left[1],
+            left[0],
         );
         if let Some(cover) = &mut app.cover_art {
             if app.image_picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks {
@@ -738,15 +723,7 @@ fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 left[2],
             );
         }
-        frame.render_widget(
-            Paragraph::new(progress_bar(
-                app.position,
-                app.duration,
-                left[3].width as usize,
-            ))
-            .style(Style::default().fg(accent_color())),
-            left[3],
-        );
+        progress_bar(frame, app, left[3]);
         let duration = if app.duration > 0.0 {
             time(app.duration)
         } else if track.duration.is_empty() {
@@ -754,97 +731,25 @@ fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             track.duration.clone()
         };
+        let status = Layout::horizontal([Constraint::Min(0), Constraint::Length(7)]).split(left[4]);
         frame.render_widget(
-            Paragraph::new(format!(
-                "{} / {}     vol {}",
-                time(app.position),
-                duration,
-                app.volume
-            ))
-            .style(Style::default().fg(muted_color())),
-            left[4],
+            Paragraph::new(format!("{} / {duration}", time(app.position)))
+                .style(Style::default().fg(muted_color())),
+            status[0],
+        );
+        frame.render_widget(
+            Paragraph::new(format!("vol {}", app.volume))
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(muted_color())),
+            status[1],
         );
     }
-    let tabs = [
-        ("q queue", app.now_panel == crate::app::NowPanel::Queue),
-        (
-            "v visualizer",
-            app.now_panel == crate::app::NowPanel::Visualizer,
-        ),
-        ("y lyrics", app.now_panel == crate::app::NowPanel::Lyrics),
-    ];
-    let header = if right[0].width < 34 {
-        let (key, label) = match app.now_panel {
-            crate::app::NowPanel::Queue => ("q", "queue"),
-            crate::app::NowPanel::Visualizer => ("v", "visualizer"),
-            crate::app::NowPanel::Lyrics => ("y", "lyrics"),
-        };
-        Line::from(Span::styled(
-            format!("{key}  {label}"),
-            Style::default()
-                .fg(accent_color())
-                .add_modifier(Modifier::BOLD),
-        ))
-    } else {
-        tabs.into_iter()
-            .map(|(text, active)| {
-                Span::styled(
-                    format!("{text}  "),
-                    if active {
-                        Style::default()
-                            .fg(accent_color())
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(muted_color())
-                    },
-                )
-            })
-            .collect::<Line>()
-    };
-    frame.render_widget(Paragraph::new(header), right[0]);
-    let subheading = match app.now_panel {
-        crate::app::NowPanel::Queue if right[1].width >= 34 => format!(
-            "up next · {} · enter play · . actions",
-            app.queue.upcoming.len()
-        ),
-        crate::app::NowPanel::Queue => format!("up next · {}", app.queue.upcoming.len()),
-        crate::app::NowPanel::Visualizer => match app.audio_available {
-            true => format!("{} · signal live · m / [ ]", app.visualizer_mode.label()),
-            false if app.audio_capture_error.is_some() => {
-                format!("{} · no PipeWire signal", app.visualizer_mode.label())
-            }
-            false => format!("{} · waiting for signal…", app.visualizer_mode.label()),
-        },
-        crate::app::NowPanel::Lyrics => match &app.lyrics {
-            Some(lyrics) if lyrics.has_synced() && lyrics.plain.is_some() => {
-                if app.lyrics_plain {
-                    "plain lyrics · p synced".into()
-                } else {
-                    "synced lyrics · p plain".into()
-                }
-            }
-            Some(lyrics) if lyrics.has_synced() => "synced lyrics · follows playback".into(),
-            Some(_) => "plain lyrics · j/k scroll".into(),
-            None if app.lyrics_loading => "lyrics · searching LRCLIB…".into(),
-            None if app.lyrics_error.is_some() => "lyrics · lookup failed".into(),
-            None => "lyrics · not found".into(),
-        },
-    };
-    let subheading = if right[1].width < 24 {
-        format!("{subheading} · tab")
-    } else {
-        subheading
-    };
-    frame.render_widget(
-        Paragraph::new(subheading).style(Style::default().fg(muted_color())),
-        right[1],
-    );
     match app.now_panel {
         crate::app::NowPanel::Queue => {
             if app.queue.upcoming.is_empty() {
                 frame.render_widget(
                     Paragraph::new("Queue is empty").style(Style::default().fg(muted_color())),
-                    right[2],
+                    panes[2],
                 );
             } else {
                 tracks(
@@ -853,12 +758,12 @@ fn playing_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     &mut app.queue_state,
                     &app.queue_marks,
                     true,
-                    right[2],
+                    panes[2],
                 );
             }
         }
-        crate::app::NowPanel::Visualizer => render_visualizer(frame, app, right[2]),
-        crate::app::NowPanel::Lyrics => render_lyrics(frame, app, right[2]),
+        crate::app::NowPanel::Visualizer => render_visualizer(frame, app, panes[2]),
+        crate::app::NowPanel::Lyrics => render_lyrics(frame, app, panes[2]),
     }
     footer(frame, app, layout[2]);
 }
@@ -1206,19 +1111,35 @@ fn render_cover(
     }
 }
 
-fn progress_bar(position: f64, duration: f64, width: usize) -> String {
-    let width = width.max(1);
-    let ratio = if duration > 0.0 {
-        (position / duration).clamp(0.0, 1.0)
+fn progress_bar(frame: &mut Frame, app: &App, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+    let ratio = if app.duration > 0.0 {
+        (app.position / app.duration).clamp(0.0, 1.0)
     } else {
         0.0
     };
-    let filled = (ratio * width as f64).round() as usize;
-    format!(
-        "{}{}",
-        "━".repeat(filled),
-        "─".repeat(width.saturating_sub(filled))
-    )
+    let filled = ((ratio * area.width as f64).round() as u16).min(area.width);
+    if filled > 0 {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(progress_elapsed_color())),
+            Rect {
+                width: filled,
+                ..area
+            },
+        );
+    }
+    if filled < area.width {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(progress_remaining_color())),
+            Rect {
+                x: area.x + filled,
+                width: area.width - filled,
+                ..area
+            },
+        );
+    }
 }
 
 fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -1893,7 +1814,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn now_playing_layout_renders_cover_tabs_and_queue() {
+    async fn now_playing_layout_renders_cover_panels_and_queue() {
         let mut app = App::new().await.unwrap();
         app.now_playing_view = true;
         app.queue.current = Some(track("Current track"));
@@ -1912,8 +1833,6 @@ mod tests {
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("Current track"));
         assert!(text.contains("Next track"));
-        assert!(text.contains("visualizer"));
-        assert!(text.contains("lyrics"));
         app.now_panel = crate::app::NowPanel::Visualizer;
         app.audio_available = true;
         app.audio_bands = vec![0.4; 48];
@@ -1935,7 +1854,6 @@ mod tests {
         ] {
             app.visualizer_mode = mode;
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-            assert!(buffer_text(terminal.backend().buffer()).contains(mode.label()));
         }
         app.image_picker
             .set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
@@ -1944,6 +1862,39 @@ mod tests {
             buffer_text(terminal.backend().buffer())
                 .contains("terminal image protocol unavailable")
         );
+    }
+
+    #[tokio::test]
+    async fn progress_bar_uses_configured_height_and_colors() {
+        let mut app = App::new().await.unwrap();
+        app.now_playing_view = true;
+        app.queue.current = Some(track("Current track"));
+        app.position = 25.0;
+        app.duration = 100.0;
+        app.config.progress.height = 3;
+        app.config.progress.elapsed = Some("#112233".into());
+        app.config.progress.remaining = Some("#445566".into());
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let elapsed = Color::Rgb(0x11, 0x22, 0x33);
+        let remaining = Color::Rgb(0x44, 0x55, 0x66);
+        let width = buffer.area.width as usize;
+        let mut rows = BTreeSet::new();
+        let mut elapsed_cells = 0;
+        let mut remaining_cells = 0;
+        for (index, cell) in buffer.content.iter().enumerate() {
+            if cell.bg == elapsed {
+                elapsed_cells += 1;
+                rows.insert(index / width);
+            } else if cell.bg == remaining {
+                remaining_cells += 1;
+                rows.insert(index / width);
+            }
+        }
+        assert!(elapsed_cells > 0);
+        assert!(remaining_cells > 0);
+        assert_eq!(rows.len(), 3);
     }
 
     #[tokio::test]

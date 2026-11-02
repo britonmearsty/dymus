@@ -123,20 +123,6 @@ impl VisualizerMode {
             Self::BrailleBars => Self::Bars,
         }
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Spectrum => "spectrum",
-            Self::Waveform => "waveform",
-            Self::Orbit => "orbit",
-            Self::Pulse => "pulse",
-            Self::Spectrogram => "spectrogram",
-            Self::Vectorscope => "vectorscope",
-            Self::Constellation => "constellation",
-            Self::Bars => "bars",
-            Self::BrailleBars => "braille bars",
-        }
-    }
 }
 
 pub struct CoverArt {
