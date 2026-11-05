@@ -1144,26 +1144,10 @@ fn progress_bar(frame: &mut Frame, app: &App, area: Rect) {
 
 fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
     let detail = app.home_focused || app.explore_focused;
-    let tabs = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
-    let mut title = if app.home_focused {
-        "home · recommendations"
-    } else {
-        "explore · new music"
-    }
-    .to_owned();
-    if app.discovery_loading && !app.discovery_items.is_empty() {
-        title.push_str(" · refreshing…");
-    } else if !app.discovery_continuations.is_empty() {
-        title.push_str(" · L more");
-    }
-    frame.render_widget(
-        Paragraph::new(title).style(Style::default().fg(muted_color())),
-        tabs[0],
-    );
     if (app.discovery_loading && app.discovery_items.is_empty()) || app.library_loading {
         frame.render_widget(
             Paragraph::new("Loading…").style(Style::default().fg(muted_color())),
-            tabs[1],
+            area,
         );
         return;
     }
@@ -1171,7 +1155,7 @@ fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
         if app.results.is_empty() {
             frame.render_widget(
                 Paragraph::new("No tracks").style(Style::default().fg(muted_color())),
-                tabs[1],
+                area,
             );
         } else {
             tracks(
@@ -1180,7 +1164,7 @@ fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
                 &mut app.results_state,
                 &app.result_marks,
                 true,
-                tabs[1],
+                area,
             );
         }
         return;
@@ -1193,7 +1177,7 @@ fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         frame.render_widget(
             Paragraph::new(message).style(Style::default().fg(muted_color())),
-            tabs[1],
+            area,
         );
         return;
     }
@@ -1203,34 +1187,33 @@ fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
     for item in &app.discovery_items {
         let starts_section = item.section != previous_section && !item.section.trim().is_empty();
         previous_section = &item.section;
-
-        if starts_section {
-            // Headings are display-only rows: they are not part of keyboard
-            // selection, and their single leading spacer separates sections.
-            rows.push(Row::new(vec![Cell::default(), Cell::default()]));
-            rows.push(Row::new(vec![
-                Cell::from(item.section.as_str()).style(
-                    Style::default()
-                        .fg(muted_color())
-                        .add_modifier(Modifier::ITALIC | Modifier::UNDERLINED),
-                ),
-                Cell::default(),
-            ]));
-        }
         item_rows.push(rows.len());
         rows.push(Row::new(vec![
+            Cell::from(if starts_section {
+                item.section.as_str()
+            } else {
+                ""
+            })
+            .style(Style::default().fg(muted_color())),
             Cell::from(item.title.as_str()),
             Cell::from(item.detail.as_str()).style(Style::default().fg(secondary_color())),
         ]));
     }
-    let table = Table::new(rows, [Constraint::Fill(2), Constraint::Fill(1)])
-        .column_spacing(2)
-        .highlight_symbol("› ")
-        .row_highlight_style(
-            Style::default()
-                .fg(accent_color())
-                .add_modifier(Modifier::BOLD),
-        );
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+        ],
+    )
+    .column_spacing(1)
+    .highlight_symbol("› ")
+    .row_highlight_style(
+        Style::default()
+            .fg(accent_color())
+            .add_modifier(Modifier::BOLD),
+    );
     let selected = app
         .discovery_state
         .selected()
@@ -1243,7 +1226,7 @@ fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut display_state = TableState::new()
         .with_selected(selected)
         .with_offset(offset);
-    frame.render_stateful_widget(table, tabs[1], &mut display_state);
+    frame.render_stateful_widget(table, area, &mut display_state);
     *app.discovery_state.offset_mut() = item_rows
         .iter()
         .position(|&row| row >= display_state.offset())

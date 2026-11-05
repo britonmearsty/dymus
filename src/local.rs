@@ -107,6 +107,35 @@ pub fn artwork(path: &Path) -> Option<PathBuf> {
         )
         .find(|candidate| candidate.is_file())
 }
+pub fn embedded_artwork(path: &Path) -> Option<image::DynamicImage> {
+    if is_video(path) {
+        return None;
+    }
+    let output = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args([
+            "-map",
+            "0:v:0",
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=w='min(1024,iw)':h='min(1024,ih)':force_original_aspect_ratio=decrease",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
+            "pipe:1",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    image::load_from_memory(&output.stdout).ok()
+}
 pub fn file_uri(path: &Path) -> Option<String> {
     reqwest::Url::from_file_path(path).ok().map(Into::into)
 }

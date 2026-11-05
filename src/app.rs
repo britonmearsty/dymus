@@ -2227,18 +2227,19 @@ impl App {
             return;
         }
         if let Some(path) = crate::local::path(&track.id) {
-            let path = crate::local::artwork(path);
+            let media_path = path.to_owned();
+            let sidecar = crate::local::artwork(path);
             let generation = self.generation;
-            self.cover_loading = path.is_some();
+            self.cover_loading = true;
             self.cover_task = Some(tokio::spawn(async move {
-                let image = if let Some(path) = path {
-                    tokio::task::spawn_blocking(move || image::open(path).ok())
-                        .await
-                        .ok()
-                        .flatten()
-                } else {
-                    None
-                };
+                let image = tokio::task::spawn_blocking(move || {
+                    sidecar
+                        .and_then(|path| image::open(path).ok())
+                        .or_else(|| crate::local::embedded_artwork(&media_path))
+                })
+                .await
+                .ok()
+                .flatten();
                 (
                     generation,
                     image.map(|image| CoverArt {
