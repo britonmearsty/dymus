@@ -1196,7 +1196,7 @@ fn discovery(frame: &mut Frame, app: &mut App, area: Rect) {
             })
             .style(Style::default().fg(muted_color())),
             Cell::from(item.title.as_str()),
-            Cell::from(item.detail.as_str()).style(Style::default().fg(secondary_color())),
+            Cell::from(format!(" {}", item.detail)).style(Style::default().fg(secondary_color())),
         ]));
     }
     let table = Table::new(
