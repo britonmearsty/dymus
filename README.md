@@ -64,16 +64,7 @@ to `PATH`, then run:
 ```sh
 dymus doctor
 dymus
-# Open the standalone MPD interface (connects to 127.0.0.1:6600)
-dymus --mpd
 ```
-
-The MPD interface connects to an existing MPD server. Set `MPD_HOST` and
-`MPD_PORT` to use a different address. Use `1`–`8` or Tab to switch between Now
-Playing, Queue, Directories, Artists, Album Artists, Albums, Playlists, and
-Search. Use `j`/`k` to browse, Enter to open or play, `a` to add the selection,
-`A` to add visible tracks, and `/` to search. Space pauses, `n`/`p` skips,
-`h`/`l` seeks, `r`/`z` toggle repeat/shuffle, and `q` quits.
 
 To install a specific release, set its tag first:
 

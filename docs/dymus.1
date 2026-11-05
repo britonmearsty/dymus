@@ -4,8 +4,6 @@ dymus \- keyboard-driven music player with terminal and headless interfaces
 .SH SYNOPSIS
 .B dymus
 .br
-.B dymus --mpd
-.br
 .B dymus search
 .I query
 .RI [ options ]
@@ -39,9 +37,6 @@ dymus \- keyboard-driven music player with terminal and headless interfaces
 .SH DESCRIPTION
 Dymus plays YouTube Music, YouTube video, and local media using mpv.
 With no command, it opens the keyboard-driven terminal interface (TUI).
-The global
-.B --mpd
-option opens a separate TUI connected to an existing MPD server.
 Headless commands provide interactive selection, inline progress, detached
 playback, downloads, and transport controls without opening the TUI.
 .PP
@@ -57,16 +52,6 @@ Print help for the selected command.
 .B \-V, \-\-version
 Print the application version.
 .SH COMMANDS
-.TP
-.B dymus --mpd
-Open the MPD interface, connecting to 127.0.0.1:6600 by default.
-Set MPD_HOST and MPD_PORT to select another server.
-Use 1 through 8 or Tab to switch between Now Playing, Queue, Directories,
-Artists, Album Artists, Albums, Playlists, and Search.
-Use j or k to browse, Enter to open or play, a to add the selection,
-A to add visible tracks, and / to search.
-Space pauses, n or p skips, h or l seeks, r or z toggles repeat or shuffle,
-and q quits.
 .TP
 .BI "search " query
 Search all YouTube, select a result, and choose audio or video playback.

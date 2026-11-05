@@ -13,7 +13,6 @@ mod local;
 mod lyrics;
 mod manual;
 mod model;
-mod mpd;
 mod mpris;
 mod player;
 mod radio;
@@ -30,9 +29,6 @@ use std::{io::IsTerminal, time::Duration};
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
-    /// Open the MPD client TUI instead of the YouTube Music interface.
-    #[arg(long)]
-    mpd: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -269,15 +265,6 @@ fn execute(cli: Cli) -> Result<()> {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    if cli.mpd {
-        if cli.command.is_some() {
-            bail!("`--mpd` cannot be combined with a subcommand.");
-        }
-        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-            bail!("The MPD TUI needs an interactive terminal.");
-        }
-        return mpd::run().await;
-    }
     match cli.command {
         Some(Command::Search {
             query,
